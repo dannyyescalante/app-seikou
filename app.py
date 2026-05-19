@@ -944,7 +944,7 @@ def main():
             with st.spinner(f"Extrayendo PDF {banco}…"):
                 try:
                     pdf_file.seek(0)
-                    df_banco = EXTRACTORS[banco](pdf_file)
+                    df_banco = EXTRACTORS[banco](io.BytesIO(pdf_file.read()))
                     if df_banco.empty:
                         st.warning(" No se extrajeron movimientos del PDF. Activa modo debug para revisar.")
                     else:
@@ -959,11 +959,11 @@ def main():
             with st.spinner("Extrayendo DMS…"):
                 try:
                     excel_file.seek(0)
-                    df_dms = extract_dms(excel_file)
+                    df_dms = extract_dms(io.BytesIO(excel_file.read()))
                     if df_dms.empty:
                         # Diagnóstico: mostrar primeras filas del archivo subido
                         excel_file.seek(0)
-                        df_diag = pd.read_excel(excel_file, header=None, dtype=str, nrows=5)
+                        df_diag = pd.read_excel(io.BytesIO(excel_file.read()), header=None, dtype=str, nrows=5)
                         st.warning(" No se extrajeron movimientos del DMS.")
                         st.info(" **Primeras 5 filas del archivo DMS subido** (para diagnóstico):")
                         st.dataframe(df_diag, use_container_width=True)
