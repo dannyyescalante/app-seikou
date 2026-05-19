@@ -1,0 +1,18 @@
+CONCILIACION BANCARIA - SEIKOU SA
+==================================
+
+INSTALACION (solo la primera vez):
+1. Instalar Python 3.11+ desde https://www.python.org/downloads/
+   IMPORTANTE: marcar la casilla "Add Python to PATH"
+2. Doble clic en: instalar.bat
+
+PARA USAR:
+- Doble clic en: run.bat
+- Se abre el navegador automaticamente en http://localhost:8501
+
+BANCOS SOPORTADOS:
+Bancolombia, BBVA, Colpatria, Davivienda, Occidente, IRIS, Finandina
+
+ARCHIVOS NECESARIOS PARA CADA CONCILIACION:
+1. PDF del extracto bancario del mes
+2. Excel de MOVIMIENTOS del DMS (ej: MOVIMIENTOS BANCOLOMBIA MARZO 2026.xlsx)

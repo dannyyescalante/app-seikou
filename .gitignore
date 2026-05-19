@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# Archivos financieros (NO subir datos de la empresa)
+*.xlsx
+*.xls
+*.pdf
+python_path.txt
+
+# Claude interno
+.claude/
+
+# Otros
+.DS_Store
+Thumbs.db
