@@ -15,12 +15,12 @@ from datetime import datetime, date
 import warnings
 warnings.filterwarnings("ignore")
 
-# ══════════════════════════════════════════════════════════════
+# ==============================================================
 # CONFIGURACIÓN UI
-# ══════════════════════════════════════════════════════════════
+# ==============================================================
 st.set_page_config(
     page_title="Conciliación Bancaria – Seikou SA",
-    page_icon="🏦",
+    page_icon="",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -49,9 +49,9 @@ INFO_BANCO = {
     "Finandina":   {"cuenta": "",          "num_cta": ""},
 }
 
-# ══════════════════════════════════════════════════════════════
+# ==============================================================
 # UTILIDADES NUMÉRICAS
-# ══════════════════════════════════════════════════════════════
+# ==============================================================
 
 def _clean_num(s):
     if s is None: return ""
@@ -60,7 +60,7 @@ def _clean_num(s):
 def parse_anglosajón(s):
     """coma=miles, punto=decimal  (Bancolombia, BBVA, Davivienda, Occidente, IRIS)"""
     v = _clean_num(s)
-    if v in ("", "-", "—", "nan", "None", "0.0"): return 0.0
+    if v in ("", "-", "-", "nan", "None", "0.0"): return 0.0
     neg = v.startswith("-"); v = v.lstrip("+-")
     try: return -float(v.replace(",", "")) if neg else float(v.replace(",", ""))
     except: return 0.0
@@ -68,7 +68,7 @@ def parse_anglosajón(s):
 def parse_europeo(s):
     """punto=miles, coma=decimal  (Colpatria)"""
     v = _clean_num(s)
-    if v in ("", "-", "—", "nan", "None"): return 0.0
+    if v in ("", "-", "-", "nan", "None"): return 0.0
     neg = v.startswith("-"); v = v.lstrip("+-")
     try: return -float(v.replace(".", "").replace(",", ".")) if neg else float(v.replace(".", "").replace(",", "."))
     except: return 0.0
@@ -80,9 +80,9 @@ def is_gmf(desc: str) -> bool:
 def _empty_df():
     return pd.DataFrame(columns=["FECHA", "DESCRIPCION", "VALOR", "TIPO", "GMF"])
 
-# ══════════════════════════════════════════════════════════════
+# ==============================================================
 # HELPERS PDF
-# ══════════════════════════════════════════════════════════════
+# ==============================================================
 
 def _lines(page, y_tol=4):
     """Agrupa palabras por línea."""
@@ -110,11 +110,11 @@ def _find_header_xs(lines_dict, *keywords):
             break
     return result
 
-# ══════════════════════════════════════════════════════════════
+# ==============================================================
 # EXTRACTORES PDF  (uno por banco)
-# ══════════════════════════════════════════════════════════════
+# ==============================================================
 
-# ── BANCOLOMBIA ─────────────────────────────────────────────
+# -- BANCOLOMBIA ---------------------------------------------
 # Estructura: FECHA | DESCRIPCIÓN | SUCURSAL | DCTO. | VALOR | SALDO
 # Fechas: d/mm  (ej. 1/03, 31/03)
 # Números: anglosajón  – el VALOR ya trae signo (neg=débito, pos=crédito)
@@ -154,7 +154,7 @@ def extract_bancolombia(pdf_file):
                               "GMF": is_gmf(desc)})
     return pd.DataFrame(rows) if rows else _empty_df()
 
-# ── BBVA ─────────────────────────────────────────────────────
+# -- BBVA -----------------------------------------------------
 # Estructura: Movi | FechaOp | FechaVal | Concepto | Cargos | Abonos | Saldo
 # Línea TX: empieza con número de movimiento de 4 dígitos
 
@@ -194,7 +194,7 @@ def extract_bbva(pdf_file):
                               "VALOR": valor, "TIPO": tipo, "GMF": is_gmf(desc)})
     return pd.DataFrame(rows) if rows else _empty_df()
 
-# ── COLPATRIA ────────────────────────────────────────────────
+# -- COLPATRIA ------------------------------------------------
 # Estructura: FECHA | OFICINA | No DOCUM | DESCRIPCION | MONTO | SALDO
 # Fecha: d/mm/yyyy   Números: europeo (punto=miles, coma=decimal)
 # TX puede ocupar 2 líneas (segunda línea = más descripción sin monto)
@@ -239,7 +239,7 @@ def extract_colpatria(pdf_file):
             if pending: rows.append(pending)
     return pd.DataFrame(rows) if rows else _empty_df()
 
-# ── DAVIVIENDA ───────────────────────────────────────────────
+# -- DAVIVIENDA -----------------------------------------------
 # Estructura: Día | Mes | Oficina | Descripción | Doc. | Débito | Crédito | Saldo
 # TX: empieza con 2 dígitos (día) + 2 dígitos (mes)
 
@@ -285,7 +285,7 @@ def extract_davivienda(pdf_file):
             if pending: rows.append(pending)
     return pd.DataFrame(rows) if rows else _empty_df()
 
-# ── OCCIDENTE ────────────────────────────────────────────────
+# -- OCCIDENTE ------------------------------------------------
 # Estructura: DIA | TRANSACCIÓN | IDENT. | DEBITOS | CREDITOS | SALDO
 # TX: empieza con día de 2 dígitos
 
@@ -321,7 +321,7 @@ def extract_occidente(pdf_file):
                               "VALOR": valor, "TIPO": tipo, "GMF": is_gmf(desc)})
     return pd.DataFrame(rows) if rows else _empty_df()
 
-# ── IRIS ─────────────────────────────────────────────────────
+# -- IRIS -----------------------------------------------------
 # Estructura: DÍA | REFERENCIA | DESCRIPCIÓN | MOVIMIENTOS | SALDO
 # Fecha: dd/mm/yy   MOVIMIENTOS: $ negativo=débito, positivo=crédito
 
@@ -367,9 +367,9 @@ EXTRACTORS = {
     "Finandina":   extract_finandina,
 }
 
-# ══════════════════════════════════════════════════════════════
+# ==============================================================
 # EXTRACTOR DMS  (MOVIMIENTOS BANCO MARZO XXXX.xlsx)
-# ══════════════════════════════════════════════════════════════
+# ==============================================================
 # Estructura (14 columnas):
 #   0=Doc/Pref+Num  1=Descripción(fecha+nombre+notas)  ...
 #   5=Débito DMS (dinero entrando al banco = CREDITO en extracto)
@@ -476,12 +476,12 @@ def extract_dms(excel_file) -> pd.DataFrame:
         st.exception(e)
         return _empty_df()
 
-# ══════════════════════════════════════════════════════════════
+# ==============================================================
 # CONCILIACIÓN
-# ══════════════════════════════════════════════════════════════
+# ==============================================================
 
 def _resultado_vacio(df_banco):
-    """Resultado cuando el DMS está vacío — todo el banco queda sin cruzar."""
+    """Resultado cuando el DMS está vacío - todo el banco queda sin cruzar."""
     gmf_col = "GMF" in df_banco.columns
     gmf  = df_banco[df_banco["GMF"]].copy()  if gmf_col else _empty_df()
     solo = df_banco[~df_banco["GMF"]].copy() if gmf_col else df_banco.copy()
@@ -559,11 +559,11 @@ def conciliar(df_banco: pd.DataFrame, df_dms: pd.DataFrame) -> dict:
         "gmf_df":    df_banco[df_banco["GMF"]].copy(),
     }
 
-# ══════════════════════════════════════════════════════════════
+# ==============================================================
 # GENERADOR EXCEL  (7 hojas)
-# ══════════════════════════════════════════════════════════════
+# ==============================================================
 
-# ─ Estilos ──────────────────────────────────────────────────
+# - Estilos --------------------------------------------------
 def _fill(hex_color):
     return PatternFill(fill_type="solid", fgColor=hex_color)
 
@@ -619,7 +619,7 @@ def _write_df(ws, df, start_row=1, hdr_fill=None, num_cols=None):
         ))
         ws.column_dimensions[_col_letter(j)].width = min(max_len + 3, 55)
 
-# ─ Hoja CARATULA ────────────────────────────────────────────
+# - Hoja CARATULA --------------------------------------------
 
 def _sc(ws, cell, val, bold=False, size=10, num_fmt=None, color="000000", align="left"):
     if cell not in (None, ""):
@@ -647,7 +647,7 @@ def _write_caratula(ws, df_banco, df_dms, resultado,
                     saldo_banco, saldo_dms, elaborado_por, fecha_corte):
     ws.sheet_view.showGridLines = False
 
-    # ── Encabezado ──
+    # -- Encabezado --
     _sc(ws, "B1", "Conciliación Bancaria", bold=True, size=14, align="center")
     ws.merge_cells("B1:F1")
     ws["B1"].fill = FILL_AZUL; ws["B1"].font = Font(bold=True, color="FFFFFF", size=14, name="Calibri")
@@ -664,7 +664,7 @@ def _write_caratula(ws, df_banco, df_dms, resultado,
     ws["F4"] = saldo_dms; ws["F4"].number_format = "#,##0.00"; ws["F4"].font = FONT_BOLD
     _sc(ws, "B5", "# Cta");    _sc(ws, "C5", num_cuenta)
 
-    # ── Sumas por sección ──
+    # -- Sumas por sección --
     sb = resultado["solo_bco"]
     xr = resultado["x_rev_df"]
 
@@ -689,7 +689,7 @@ def _write_caratula(ws, df_banco, df_dms, resultado,
     dif_color = "00AA00" if abs(diferencia) < 1 else "FF0000"
     ws["F9"].font = Font(bold=True, color=dif_color, size=10, name="Calibri")
 
-    # ── Sección a) Pagos Banco no Contabilidad ──
+    # -- Sección a) Pagos Banco no Contabilidad --
     _sc(ws, "B12", "a) Pagos Banco no Contabilidad  REVISAR TESORERIA", bold=True, size=10)
     ws["B12"].fill = _fill("D6E4F7")
     _sc(ws, "B14", "Fecha"); _sc(ws, "C14", "Concepto")
@@ -701,7 +701,7 @@ def _write_caratula(ws, df_banco, df_dms, resultado,
     ws["C20"] = "Total"; ws["C20"].font = FONT_BOLD
     ws["D20"] = a; ws["D20"].number_format = "#,##0.00"; ws["D20"].font = FONT_BOLD
 
-    # ── Sección b) Cobros Banco no Contabilidad ──
+    # -- Sección b) Cobros Banco no Contabilidad --
     _sc(ws, "B22", "b) Consignaciones  Banco no Contabilidad", bold=True)
     ws["B22"].fill = _fill("D6E4F7")
     for col in ["B24","C24","D24","E24","F24"]:
@@ -713,7 +713,7 @@ def _write_caratula(ws, df_banco, df_dms, resultado,
     ws["C31"] = "Total"; ws["C31"].font = FONT_BOLD
     ws["D31"] = b; ws["D31"].number_format = "#,##0.00"; ws["D31"].font = FONT_BOLD
 
-    # ── Sección c) Pagos Contabilidad no Banco ──
+    # -- Sección c) Pagos Contabilidad no Banco --
     _sc(ws, "B33", "c) Pagos - notas Contabilidad no Banco  REVISAR TESORERIA", bold=True)
     ws["B33"].fill = _fill("D6E4F7")
     for col in ["B35","C35","D35","E35","F35"]:
@@ -725,7 +725,7 @@ def _write_caratula(ws, df_banco, df_dms, resultado,
     ws["C46"] = "Total"; ws["C46"].font = FONT_BOLD
     ws["D46"] = c; ws["D46"].number_format = "#,##0.00"; ws["D46"].font = FONT_BOLD
 
-    # ── Sección d) Cobros Contabilidad no Banco ──
+    # -- Sección d) Cobros Contabilidad no Banco --
     _sc(ws, "B48", "d) Consignaciones Contabilidad no Banco  TRANSICION", bold=True)
     ws["B48"].fill = _fill("D6E4F7")
     for col in ["B50","C50","D50","E50","F50"]:
@@ -737,7 +737,7 @@ def _write_caratula(ws, df_banco, df_dms, resultado,
     ws["C59"] = "Total"; ws["C59"].font = FONT_BOLD
     ws["D59"] = d; ws["D59"].number_format = "#,##0.00"; ws["D59"].font = FONT_BOLD
 
-    # ── Firma ──
+    # -- Firma --
     ws["B63"] = "ELABORO"; ws["B63"].font = FONT_BOLD
     ws["B64"] = elaborado_por; ws["B64"].font = FONT_NORM
 
@@ -770,37 +770,37 @@ def generar_excel(df_banco, df_dms, resultado,
         if ws.max_row > 0: ws.delete_rows(1, ws.max_row + 1)
         return ws
 
-    # ── CARATULA ──
+    # -- CARATULA --
     ws_car = _get("CARATULA")
     _write_caratula(ws_car, df_banco, df_dms, resultado,
                     nombre_banco, cuenta_contable, num_cuenta,
                     saldo_banco, saldo_dms, elaborado_por, fecha_corte)
 
-    # ── BANCO (FECHA | DESCRIPCIÓN | VALOR) ──
+    # -- BANCO (FECHA | DESCRIPCIÓN | VALOR) --
     ws_bco = _get("BANCO")
     df_bco_out = df_banco[["FECHA", "DESCRIPCION", "VALOR"]].copy()
     df_bco_out.columns = ["FECHA", "DESCRIPCIÓN", "VALOR"]
     _write_df(ws_bco, df_bco_out, num_cols=["VALOR"])
 
-    # ── DMS (FECHA | DESCRIPCION | VALOR | TIPO | DOC_DMS) ──
+    # -- DMS (FECHA | DESCRIPCION | VALOR | TIPO | DOC_DMS) --
     ws_dms = _get("DMS")
     dms_cols = ["FECHA", "DESCRIPCION", "VALOR", "TIPO"]
     if "DOC_DMS" in df_dms.columns: dms_cols.append("DOC_DMS")
     _write_df(ws_dms, df_dms[dms_cols], num_cols=["VALOR"])
 
-    # ── + (cruzados CREDITO) ──
+    # -- + (cruzados CREDITO) --
     ws_mas = _get("+")
     mas = resultado["mas_df"]
     if not mas.empty:
         _write_df(ws_mas, mas, hdr_fill=FILL_VERDE, num_cols=["VALOR","Valor DMS","Dif"])
 
-    # ── - (cruzados DEBITO) ──
+    # -- - (cruzados DEBITO) --
     ws_men = _get("-")
     menos = resultado["menos_df"]
     if not menos.empty:
         _write_df(ws_men, menos, hdr_fill=FILL_ROJO, num_cols=["VALOR","Valor DMS","Dif"])
 
-    # ── X REVISAR (DMS sin match) ──
+    # -- X REVISAR (DMS sin match) --
     ws_xr = _get("X REVISAR")
     xr = resultado["x_rev_df"]
     if not xr.empty:
@@ -810,7 +810,7 @@ def generar_excel(df_banco, df_dms, resultado,
         xr_out["VALOR"] = xr_out["VALOR"].abs()
         _write_df(ws_xr, xr_out, hdr_fill=FILL_NARANJA, num_cols=["VALOR"])
 
-    # ── GMF ──
+    # -- GMF --
     ws_gmf = _get("GMF")
     gmf = resultado["gmf_df"]
     if not gmf.empty:
@@ -822,15 +822,15 @@ def generar_excel(df_banco, df_dms, resultado,
     buf.seek(0)
     return buf
 
-# ══════════════════════════════════════════════════════════════
+# ==============================================================
 # UI STREAMLIT
-# ══════════════════════════════════════════════════════════════
+# ==============================================================
 
 def _fmt(v): return f"$ {v:>18,.2f}"
 
 def _mostrar(resultado, df_banco, df_dms, banco, saldo_banco, saldo_dms):
     st.divider()
-    st.subheader("📊 Resultados de la conciliación")
+    st.subheader(" Resultados de la conciliación")
 
     total_b  = len(df_banco)
     total_d  = len(df_dms)
@@ -847,24 +847,24 @@ def _mostrar(resultado, df_banco, df_dms, banco, saldo_banco, saldo_dms):
     c1.metric("Mov. Banco",  total_b)
     c2.metric("Mov. DMS",    total_d)
     c3.metric("Conciliados", concil, f"{pct}%")
-    c4.metric("Solo Banco",  n_sb,   delta=f"-{n_sb}"  if n_sb else None, delta_color="inverse")
-    c5.metric("X Revisar",   n_xr,   delta=f"-{n_xr}"  if n_xr else None, delta_color="inverse")
+    c4.metric("Solo Banco",  n_sb,   delta=f"-{n_sb}" if n_sb else None, delta_color="inverse")
+    c5.metric("X Revisar",   n_xr,   delta=f"-{n_xr}" if n_xr else None, delta_color="inverse")
     c6.metric("GMF",         n_gmf)
 
     c7,c8,c9 = st.columns(3)
     c7.metric("Saldo Banco",  _fmt(saldo_banco))
     c8.metric("Saldo DMS",    _fmt(saldo_dms))
     c9.metric("Diferencia",   _fmt(dif),
-              delta="✅ Cuadrado" if abs(dif) < 1 else "⚠️ Diferencia")
+              delta=" Cuadrado" if abs(dif) < 1 else " Diferencia")
 
     tabs = st.tabs([
-        f"🏦 Banco ({total_b})",
-        f"📋 DMS ({total_d})",
-        f"✅ + Créditos ({n_mas})",
-        f"✅ − Débitos ({n_men})",
-        f"⚠️ Solo Banco ({n_sb})",
-        f"🔍 X Revisar ({n_xr})",
-        f"🏷️ GMF ({n_gmf})",
+        f" Banco ({total_b})",
+        f" DMS ({total_d})",
+        f" + Créditos ({n_mas})",
+        f" − Débitos ({n_men})",
+        f" Solo Banco ({n_sb})",
+        f" X Revisar ({n_xr})",
+        f" GMF ({n_gmf})",
     ])
     with tabs[0]:
         st.dataframe(df_banco[["FECHA","DESCRIPCION","VALOR","TIPO","GMF"]], use_container_width=True, height=380)
@@ -894,9 +894,9 @@ def _mostrar(resultado, df_banco, df_dms, banco, saldo_banco, saldo_dms):
 
 
 def main():
-    # ── Sidebar ──────────────────────────────────────────────
+    # -- Sidebar ----------------------------------------------
     with st.sidebar:
-        st.title("⚙️ Configuración")
+        st.title(" Configuración")
         banco = st.selectbox("Banco", BANCOS)
 
         info = INFO_BANCO.get(banco, {})
@@ -906,25 +906,25 @@ def main():
         elaborado_por   = st.text_input("Elaborado por",         "Contabilidad Seikou")
 
         st.divider()
-        st.subheader("💰 Saldos")
+        st.subheader(" Saldos")
         saldo_banco = st.number_input("Saldo Extracto Banco ($)", value=0.0, format="%.2f", step=1000.0)
         saldo_dms   = st.number_input("Saldo Contable DMS ($)",   value=0.0, format="%.2f", step=1000.0)
 
         st.divider()
-        plantilla_file = st.file_uploader("📎 Plantilla Excel (opcional)", type=["xlsx"])
+        plantilla_file = st.file_uploader(" Plantilla Excel (opcional)", type=["xlsx"])
 
         st.divider()
-        debug_mode = st.checkbox("🔍 Debug: ver posiciones PDF")
+        debug_mode = st.checkbox(" Debug: ver posiciones PDF")
 
-    # ── Área principal ────────────────────────────────────────
-    st.title("🏦 Conciliación Bancaria — Seikou S.A.")
+    # -- Área principal ----------------------------------------
+    st.title(" Conciliación Bancaria - Seikou S.A.")
 
     col1, col2 = st.columns(2)
     with col1:
-        st.subheader(f"📄 Extracto bancario – {banco}")
+        st.subheader(f" Extracto bancario – {banco}")
         pdf_file = st.file_uploader(f"Subir PDF {banco}", type=["pdf"], key="pdf_up")
     with col2:
-        st.subheader("📊 Movimientos DMS")
+        st.subheader(" Movimientos DMS")
         excel_file = st.file_uploader(
             f"Subir Excel DMS  (MOVIMIENTOS {banco.upper()} MARZO…xlsx)",
             type=["xlsx", "xls"], key="dms_up"
@@ -932,30 +932,30 @@ def main():
 
     # Debug: muestra palabras del PDF con posición x
     if debug_mode and pdf_file:
-        with st.expander("🔍 Primeras 80 palabras del PDF (para calibrar x-posiciones)", expanded=False):
+        with st.expander(" Primeras 80 palabras del PDF (para calibrar x-posiciones)", expanded=False):
             with pdfplumber.open(pdf_file) as pdf:
                 words = pdf.pages[0].extract_words(x_tolerance=3, y_tolerance=5)[:80]
             st.dataframe(pd.DataFrame(words)[["text","x0","top","x1","bottom"]], use_container_width=True)
         pdf_file.seek(0)
 
     if pdf_file and excel_file:
-        if st.button("🔄 Procesar Conciliación", type="primary", use_container_width=True):
-            # ── Extraer banco ──
+        if st.button(" Procesar Conciliación", type="primary", use_container_width=True):
+            # -- Extraer banco --
             with st.spinner(f"Extrayendo PDF {banco}…"):
                 try:
                     pdf_file.seek(0)
                     df_banco = EXTRACTORS[banco](pdf_file)
                     if df_banco.empty:
-                        st.warning("⚠️ No se extrajeron movimientos del PDF. Activa modo debug para revisar.")
+                        st.warning(" No se extrajeron movimientos del PDF. Activa modo debug para revisar.")
                     else:
-                        st.success(f"✅ {banco}: {len(df_banco)} movimientos  |  "
+                        st.success(f" {banco}: {len(df_banco)} movimientos  |  "
                                    f"Créditos: {(df_banco.TIPO=='CREDITO').sum()}  "
                                    f"Débitos: {(df_banco.TIPO=='DEBITO').sum()}  "
                                    f"GMF: {df_banco.GMF.sum()}")
                 except Exception as e:
-                    st.error(f"❌ Error PDF: {e}"); st.exception(e); return
+                    st.error(f" Error PDF: {e}"); st.exception(e); return
 
-            # ── Extraer DMS ──
+            # -- Extraer DMS --
             with st.spinner("Extrayendo DMS…"):
                 try:
                     excel_file.seek(0)
@@ -964,21 +964,21 @@ def main():
                         # Diagnóstico: mostrar primeras filas del archivo subido
                         excel_file.seek(0)
                         df_diag = pd.read_excel(excel_file, header=None, dtype=str, nrows=5)
-                        st.warning("⚠️ No se extrajeron movimientos del DMS.")
-                        st.info("📋 **Primeras 5 filas del archivo DMS subido** (para diagnóstico):")
+                        st.warning(" No se extrajeron movimientos del DMS.")
+                        st.info(" **Primeras 5 filas del archivo DMS subido** (para diagnóstico):")
                         st.dataframe(df_diag, use_container_width=True)
                         st.info("El archivo DMS debe ser el Excel de **MOVIMIENTOS** "
                                 "(ej: *MOVIMIENTOS BANCOLOMBIA MARZO 2026.xlsx*), "
                                 "no el extracto bancario ni la plantilla.")
                         return
                     else:
-                        st.success(f"✅ DMS: {len(df_dms)} movimientos  |  "
+                        st.success(f" DMS: {len(df_dms)} movimientos  |  "
                                    f"Créditos: {(df_dms.TIPO=='CREDITO').sum()}  "
                                    f"Débitos: {(df_dms.TIPO=='DEBITO').sum()}")
                 except Exception as e:
-                    st.error(f"❌ Error DMS: {e}"); st.exception(e); return
+                    st.error(f" Error DMS: {e}"); st.exception(e); return
 
-            # ── Conciliar ──
+            # -- Conciliar --
             with st.spinner("Conciliando…"):
                 resultado = conciliar(df_banco, df_dms)
 
@@ -994,7 +994,7 @@ def main():
 
             _mostrar(resultado, df_banco, df_dms, banco, saldo_banco, saldo_dms)
 
-            # ── Generar Excel ──
+            # -- Generar Excel --
             with st.spinner("Generando Excel…"):
                 excel_buf = generar_excel(
                     df_banco, df_dms, resultado,
@@ -1003,7 +1003,7 @@ def main():
                     plantilla_file,
                 )
                 st.session_state["excel_buf"] = excel_buf
-                st.success("✅ Excel listo para descargar")
+                st.success(" Excel listo para descargar")
 
     elif "resultado" in st.session_state:
         cfg = st.session_state["cfg"]
@@ -1013,13 +1013,13 @@ def main():
                  st.session_state.get("banco",""),
                  cfg["saldo_banco"], cfg["saldo_dms"])
 
-    # ── Botón descarga ──
+    # -- Botón descarga --
     if "excel_buf" in st.session_state:
         st.divider()
         cfg = st.session_state.get("cfg", {})
         fn  = f"conciliacion_{cfg.get('banco','')}_{cfg.get('fecha_corte','')}.xlsx"
         st.download_button(
-            "📥 Descargar Excel Conciliación",
+            " Descargar Excel Conciliación",
             data=st.session_state["excel_buf"],
             file_name=fn,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
