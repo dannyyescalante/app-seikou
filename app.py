@@ -943,8 +943,15 @@ def main():
             # -- Extraer banco --
             with st.spinner(f"Extrayendo PDF {banco}…"):
                 try:
+                    import tempfile, os
                     pdf_file.seek(0)
-                    df_banco = EXTRACTORS[banco](io.BytesIO(pdf_file.read()))
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                        tmp.write(pdf_file.read())
+                        tmp_path = tmp.name
+                    try:
+                        df_banco = EXTRACTORS[banco](tmp_path)
+                    finally:
+                        os.unlink(tmp_path)
                     if df_banco.empty:
                         st.warning(" No se extrajeron movimientos del PDF. Activa modo debug para revisar.")
                     else:
