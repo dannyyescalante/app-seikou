@@ -480,6 +480,38 @@ def extract_dms(excel_file) -> pd.DataFrame:
 # CONCILIACIÓN
 # ==============================================================
 
+def _find_subset(d_avail: pd.DataFrame, objetivo: int, max_n: int = 15, tol: int = 1):
+    """
+    Busca subconjunto de filas en d_avail cuya suma de VALOR.abs() == objetivo ± tol.
+    Retorna lista de índices del DataFrame original, o None si no encuentra.
+    Usado para cruzar N registros DMS contra 1 movimiento bancario.
+    """
+    from itertools import combinations
+
+    cands = d_avail[d_avail["VALOR"].abs() <= objetivo + tol + 1].copy()
+    if len(cands) < 2:
+        return None
+
+    vals = cands["VALOR"].abs().round(0).astype(int).tolist()
+    idxs = cands.index.tolist()
+    pairs = sorted(zip(vals, idxs), reverse=True)[:25]
+    vals_s = [v for v, _ in pairs]
+    idxs_s = [i for _, i in pairs]
+
+    # Límites de pool por n para evitar explosión combinatoria
+    limits = {2: 25, 3: 25, 4: 20, 5: 15, 6: 12, 7: 10, 8: 8, 9: 7, 10: 6}
+
+    for n in range(2, min(max_n + 1, len(pairs) + 1)):
+        if sum(vals_s[:n]) < objetivo - tol:
+            continue
+        pool = min(len(pairs), limits.get(n, 6))
+        for combo in combinations(range(pool), n):
+            if abs(sum(vals_s[i] for i in combo) - objetivo) <= tol:
+                return [idxs_s[i] for i in combo]
+
+    return None
+
+
 def _resultado_vacio(df_banco):
     """Resultado cuando el DMS está vacío - todo el banco queda sin cruzar."""
     gmf_col = "GMF" in df_banco.columns
@@ -519,7 +551,9 @@ def conciliar(df_banco: pd.DataFrame, df_dms: pd.DataFrame) -> dict:
         d["_KEY"] = d["VALOR"].abs().round(0).astype(int)
 
         used_d = set()
+        solo_b_tipo = []
 
+        # Paso 1: cruce 1-a-1
         for bi, b_row in b.iterrows():
             bk = b_row["_KEY"]
             cands = d[(d["_KEY"].between(bk - 1, bk + 1)) & (~d.index.isin(used_d))]
@@ -527,18 +561,48 @@ def conciliar(df_banco: pd.DataFrame, df_dms: pd.DataFrame) -> dict:
                 best = cands.iloc[0]
                 dif  = abs(b_row["VALOR"]) - abs(best["VALOR"])
                 matched = {
-                    "FECHA":      b_row["FECHA"],
+                    "FECHA":       b_row["FECHA"],
                     "DESCRIPCION": b_row["DESCRIPCION"],
-                    "VALOR":      b_row["VALOR"],
-                    "Valor DMS":  best["VALOR"],
-                    "Doc Dms":    best.get("DOC_DMS", ""),
-                    "Dif":        round(dif, 2),
+                    "VALOR":       b_row["VALOR"],
+                    "Valor DMS":   best["VALOR"],
+                    "Doc Dms":     best.get("DOC_DMS", ""),
+                    "# DMS":       1,
+                    "Dif":         round(dif, 2),
                 }
                 if tipo == "CREDITO": mas_rows.append(matched)
                 else:                 menos_rows.append(matched)
                 used_d.add(cands.index[0])
             else:
-                solo_banco_rows.append(b_row)
+                solo_b_tipo.append(b_row)
+
+        # Paso 2: cruce N-DMS-a-1-Banco (un ingreso bancario = varios recibos DMS)
+        final_solo_b = []
+        for b_row in solo_b_tipo:
+            objetivo  = int(round(abs(b_row["VALOR"])))
+            d_avail   = d[~d.index.isin(used_d)]
+            found     = _find_subset(d_avail, objetivo)
+            if found is not None:
+                matched_dms = d.loc[found]
+                dms_sum = matched_dms["VALOR"].abs().sum()
+                docs = [str(r.get("DOC_DMS", "")) for _, r in matched_dms.iterrows()
+                        if str(r.get("DOC_DMS", "")).strip() not in ("", "nan", "None")]
+                matched = {
+                    "FECHA":       b_row["FECHA"],
+                    "DESCRIPCION": b_row["DESCRIPCION"],
+                    "VALOR":       b_row["VALOR"],
+                    "Valor DMS":   dms_sum if tipo == "CREDITO" else -dms_sum,
+                    "Doc Dms":     ", ".join(docs),
+                    "# DMS":       len(found),
+                    "Dif":         round(abs(b_row["VALOR"]) - dms_sum, 2),
+                }
+                if tipo == "CREDITO": mas_rows.append(matched)
+                else:                 menos_rows.append(matched)
+                for idx in found:
+                    used_d.add(idx)
+            else:
+                final_solo_b.append(b_row)
+
+        solo_banco_rows.extend(final_solo_b)
 
         for di, d_row in d.iterrows():
             if di not in used_d:
@@ -548,7 +612,7 @@ def conciliar(df_banco: pd.DataFrame, df_dms: pd.DataFrame) -> dict:
         if not lst: return pd.DataFrame(columns=cols or [])
         return pd.DataFrame(lst).drop(columns=["_KEY"], errors="ignore").reset_index(drop=True)
 
-    match_cols = ["FECHA", "DESCRIPCION", "VALOR", "Valor DMS", "Doc Dms", "Dif"]
+    match_cols = ["FECHA", "DESCRIPCION", "VALOR", "Valor DMS", "Doc Dms", "# DMS", "Dif"]
     banco_cols  = ["FECHA", "DESCRIPCION", "VALOR", "TIPO", "GMF"]
 
     return {
@@ -580,6 +644,7 @@ FILL_ROJO   = _fill("C0392B")
 FILL_NARANJA= _fill("E67E22")
 FILL_ALT    = _fill("EBF5FB")
 FILL_ALT2   = _fill("FDFEFE")
+FILL_AGRUP  = _fill("D6EAF8")   # azul suave – ingreso dividido en varios DMS
 FONT_HDR    = _font(bold=True, color="FFFFFF", size=10)
 FONT_BOLD   = _font(bold=True, size=10)
 FONT_NORM   = _font(size=10)
@@ -591,8 +656,9 @@ def _col_letter(n):
         r = chr(65 + rem) + r
     return r
 
-def _write_df(ws, df, start_row=1, hdr_fill=None, num_cols=None):
-    """Escribe DataFrame en hoja con header coloreado y filas alternadas."""
+def _write_df(ws, df, start_row=1, hdr_fill=None, num_cols=None, mark_col=None, mark_fill=None):
+    """Escribe DataFrame en hoja con header coloreado y filas alternadas.
+    Si mark_col se indica, resalta con mark_fill las filas donde ese campo > 1."""
     if hdr_fill is None: hdr_fill = FILL_AZUL
     if num_cols is None: num_cols = []
     cols = list(df.columns)
@@ -603,7 +669,8 @@ def _write_df(ws, df, start_row=1, hdr_fill=None, num_cols=None):
         c.alignment = Alignment(horizontal="center", vertical="center")
 
     for i, (_, row) in enumerate(df.iterrows(), 1):
-        fill = FILL_ALT if i % 2 == 0 else FILL_ALT2
+        es_agrupado = mark_col and mark_col in df.columns and (row.get(mark_col, 1) or 1) > 1
+        fill = (mark_fill or FILL_AGRUP) if es_agrupado else (FILL_ALT if i % 2 == 0 else FILL_ALT2)
         for j, col in enumerate(cols, 1):
             val = row[col]
             if hasattr(val, "item"): val = val.item()
@@ -750,6 +817,14 @@ def _write_caratula(ws, df_banco, df_dms, resultado,
     ws.column_dimensions["F"].width = 20
 
 
+def _write_leyenda_agrup(ws, row):
+    """Escribe una leyenda de color azul debajo de los datos de cruce."""
+    c_cuad = ws.cell(row, 1, "")
+    c_cuad.fill = FILL_AGRUP
+    c_txt = ws.cell(row, 2, "Fondo azul = ingreso bancario agrupado en varios recibos DMS (ver columna # DMS)")
+    c_txt.font = Font(italic=True, color="1A5276", size=9, name="Calibri")
+
+
 def generar_excel(df_banco, df_dms, resultado,
                   nombre_banco, cuenta_contable, num_cuenta,
                   saldo_banco, saldo_dms, elaborado_por, fecha_corte,
@@ -792,21 +867,26 @@ def generar_excel(df_banco, df_dms, resultado,
     ws_mas = _get("+")
     mas = resultado["mas_df"]
     if not mas.empty:
-        _write_df(ws_mas, mas, hdr_fill=FILL_VERDE, num_cols=["VALOR","Valor DMS","Dif"])
+        _write_df(ws_mas, mas, hdr_fill=FILL_VERDE, num_cols=["VALOR","Valor DMS","Dif"],
+                  mark_col="# DMS", mark_fill=FILL_AGRUP)
+        _write_leyenda_agrup(ws_mas, len(mas) + 3)
 
     # -- - (cruzados DEBITO) --
     ws_men = _get("-")
     menos = resultado["menos_df"]
     if not menos.empty:
-        _write_df(ws_men, menos, hdr_fill=FILL_ROJO, num_cols=["VALOR","Valor DMS","Dif"])
+        _write_df(ws_men, menos, hdr_fill=FILL_ROJO, num_cols=["VALOR","Valor DMS","Dif"],
+                  mark_col="# DMS", mark_fill=FILL_AGRUP)
+        _write_leyenda_agrup(ws_men, len(menos) + 3)
 
     # -- X REVISAR (DMS sin match) --
     ws_xr = _get("X REVISAR")
     xr = resultado["x_rev_df"]
     if not xr.empty:
-        out_cols = ["VALOR", "DOC_DMS"] if "DOC_DMS" in xr.columns else ["VALOR", "DESCRIPCION"]
+        out_cols = ["FECHA", "DESCRIPCION", "TIPO", "VALOR"]
+        if "DOC_DMS" in xr.columns:
+            out_cols.append("DOC_DMS")
         xr_out = xr[out_cols].copy()
-        xr_out.columns = ["VALOR", "NO"]
         xr_out["VALOR"] = xr_out["VALOR"].abs()
         _write_df(ws_xr, xr_out, hdr_fill=FILL_NARANJA, num_cols=["VALOR"])
 
@@ -882,9 +962,11 @@ def _mostrar(resultado, df_banco, df_dms, banco, saldo_banco, saldo_dms):
     with tabs[5]:
         xr = resultado["x_rev_df"]
         if not xr.empty:
-            out = xr[["VALOR","DOC_DMS"]].copy() if "DOC_DMS" in xr.columns else xr[["VALOR","DESCRIPCION"]]
-            out = out.copy(); out["VALOR"] = out["VALOR"].abs()
-            out.columns = ["VALOR","NO"]
+            out_cols = ["FECHA", "DESCRIPCION", "TIPO", "VALOR"]
+            if "DOC_DMS" in xr.columns:
+                out_cols.append("DOC_DMS")
+            out = xr[out_cols].copy()
+            out["VALOR"] = out["VALOR"].abs()
             st.dataframe(out, use_container_width=True, height=380)
         else:
             st.success("¡Todo el DMS está en el banco!")
@@ -913,6 +995,8 @@ def main():
         st.divider()
         plantilla_file = st.file_uploader(" Plantilla Excel (opcional)", type=["xlsx"])
 
+        pdf_password = st.text_input("Contrasena PDF (si aplica)", value="", type="password",
+                                     help="Algunos bancos protegen el extracto con el NIT de la empresa")
         st.divider()
         debug_mode = st.checkbox(" Debug: ver posiciones PDF")
 
@@ -949,7 +1033,7 @@ def main():
                         tmp.write(pdf_file.read())
                         tmp_path = tmp.name
                     try:
-                        df_banco = EXTRACTORS[banco](tmp_path)
+                        df_banco = EXTRACTORS[banco](tmp_path, pdf_password or "")
                     finally:
                         os.unlink(tmp_path)
                     if df_banco.empty:
