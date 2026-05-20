@@ -119,9 +119,9 @@ def _find_header_xs(lines_dict, *keywords):
 # Fechas: d/mm  (ej. 1/03, 31/03)
 # Números: anglosajón  – el VALOR ya trae signo (neg=débito, pos=crédito)
 
-def extract_bancolombia(pdf_file):
+def extract_bancolombia(pdf_file, pdf_password=""):
     rows = []
-    with pdfplumber.open(pdf_file) as pdf:
+    with pdfplumber.open(pdf_file, password=pdf_password or None) as pdf:
         for page in pdf.pages:
             lns = _lines(page)
             valor_x = saldo_x = None
@@ -158,9 +158,9 @@ def extract_bancolombia(pdf_file):
 # Estructura: Movi | FechaOp | FechaVal | Concepto | Cargos | Abonos | Saldo
 # Línea TX: empieza con número de movimiento de 4 dígitos
 
-def extract_bbva(pdf_file):
+def extract_bbva(pdf_file, pdf_password=""):
     rows = []
-    with pdfplumber.open(pdf_file) as pdf:
+    with pdfplumber.open(pdf_file, password=pdf_password or None) as pdf:
         for page in pdf.pages:
             lns = _lines(page)
             cargo_x = abono_x = None
@@ -199,9 +199,9 @@ def extract_bbva(pdf_file):
 # Fecha: d/mm/yyyy   Números: europeo (punto=miles, coma=decimal)
 # TX puede ocupar 2 líneas (segunda línea = más descripción sin monto)
 
-def extract_colpatria(pdf_file):
+def extract_colpatria(pdf_file, pdf_password=""):
     rows = []
-    with pdfplumber.open(pdf_file) as pdf:
+    with pdfplumber.open(pdf_file, password=pdf_password or None) as pdf:
         for page in pdf.pages:
             lns = _lines(page)
             monto_x = saldo_x = None
@@ -243,9 +243,9 @@ def extract_colpatria(pdf_file):
 # Estructura: Día | Mes | Oficina | Descripción | Doc. | Débito | Crédito | Saldo
 # TX: empieza con 2 dígitos (día) + 2 dígitos (mes)
 
-def extract_davivienda(pdf_file):
+def extract_davivienda(pdf_file, pdf_password=""):
     rows = []
-    with pdfplumber.open(pdf_file) as pdf:
+    with pdfplumber.open(pdf_file, password=pdf_password or None) as pdf:
         for page in pdf.pages:
             lns = _lines(page)
             deb_x = cred_x = None
@@ -289,9 +289,9 @@ def extract_davivienda(pdf_file):
 # Estructura: DIA | TRANSACCIÓN | IDENT. | DEBITOS | CREDITOS | SALDO
 # TX: empieza con día de 2 dígitos
 
-def extract_occidente(pdf_file):
+def extract_occidente(pdf_file, pdf_password=""):
     rows = []
-    with pdfplumber.open(pdf_file) as pdf:
+    with pdfplumber.open(pdf_file, password=pdf_password or None) as pdf:
         for page in pdf.pages:
             lns = _lines(page)
             deb_x = cred_x = None
@@ -325,9 +325,9 @@ def extract_occidente(pdf_file):
 # Estructura: DÍA | REFERENCIA | DESCRIPCIÓN | MOVIMIENTOS | SALDO
 # Fecha: dd/mm/yy   MOVIMIENTOS: $ negativo=débito, positivo=crédito
 
-def extract_iris(pdf_file):
+def extract_iris(pdf_file, pdf_password=""):
     rows = []
-    with pdfplumber.open(pdf_file) as pdf:
+    with pdfplumber.open(pdf_file, password=pdf_password or None) as pdf:
         for page in pdf.pages:
             lns = _lines(page)
             movi_x = None
@@ -353,7 +353,7 @@ def extract_iris(pdf_file):
                               "GMF": is_gmf(desc)})
     return pd.DataFrame(rows) if rows else _empty_df()
 
-def extract_finandina(pdf_file):
+def extract_finandina(pdf_file, pdf_password=""):
     st.warning("Extractor Finandina pendiente. Adjunta un extracto para calibrarlo.")
     return _empty_df()
 
