@@ -953,12 +953,21 @@ def _mostrar(resultado, df_banco, df_dms, banco, saldo_banco, saldo_dms):
         if "DOC_DMS" in df_dms.columns: cols_dms.append("DOC_DMS")
         st.dataframe(df_dms[cols_dms], use_container_width=True, height=380)
     with tabs[2]:
-        st.dataframe(resultado["mas_df"],   use_container_width=True, height=380) if not resultado["mas_df"].empty   else st.info("Sin créditos cruzados")
+        if not resultado["mas_df"].empty:
+            st.dataframe(resultado["mas_df"], use_container_width=True, height=380)
+        else:
+            st.info("Sin créditos cruzados")
     with tabs[3]:
-        st.dataframe(resultado["menos_df"], use_container_width=True, height=380) if not resultado["menos_df"].empty else st.info("Sin débitos cruzados")
+        if not resultado["menos_df"].empty:
+            st.dataframe(resultado["menos_df"], use_container_width=True, height=380)
+        else:
+            st.info("Sin débitos cruzados")
     with tabs[4]:
         sb = resultado["solo_bco"]
-        st.dataframe(sb[["FECHA","DESCRIPCION","VALOR","TIPO"]], use_container_width=True, height=380) if not sb.empty else st.success("¡Todo el banco está en el DMS!")
+        if not sb.empty:
+            st.dataframe(sb[["FECHA","DESCRIPCION","VALOR","TIPO"]], use_container_width=True, height=380)
+        else:
+            st.success("¡Todo el banco está en el DMS!")
     with tabs[5]:
         xr = resultado["x_rev_df"]
         if not xr.empty:
@@ -972,7 +981,10 @@ def _mostrar(resultado, df_banco, df_dms, banco, saldo_banco, saldo_dms):
             st.success("¡Todo el DMS está en el banco!")
     with tabs[6]:
         gmf = resultado["gmf_df"]
-        st.dataframe(gmf[["FECHA","DESCRIPCION","VALOR"]], use_container_width=True, height=380) if not gmf.empty else st.info("Sin GMF identificados")
+        if not gmf.empty:
+            st.dataframe(gmf[["FECHA","DESCRIPCION","VALOR"]], use_container_width=True, height=380)
+        else:
+            st.info("Sin GMF identificados")
 
 
 def main():
