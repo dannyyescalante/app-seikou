@@ -409,68 +409,120 @@ def _doc_valido(x) -> bool:
     if s in ("nan", "None", "", "0"): return False
     return bool(re.match(r"[A-Za-z0-9]", s))
 
+def _extract_dms_v1(data: bytes) -> pd.DataFrame:
+    """
+    Formato DMS clásico (14 cols):
+      col[0] = Documento  col[1] = Descripción 'DD-Mon-YYYY Notas Mov:...'
+      col[5] = Débito DMS (CREDITO extracto)   col[6] = Crédito DMS (DEBITO extracto)
+    Fila 0 = encabezado, Fila 1 = resumen apertura → datos desde fila 2.
+    """
+    df_raw = pd.read_excel(io.BytesIO(data), header=None, dtype=str, sheet_name=0)
+    rows = []
+    for _, row in df_raw.iloc[2:].iterrows():
+        doc = str(row.iloc[0]).strip()
+        if not _doc_valido(doc):
+            continue
+
+        desc  = str(row.iloc[1]).strip()
+        deb5  = str(row.iloc[5]).strip() if len(row) > 5 else "nan"
+        cred6 = str(row.iloc[6]).strip() if len(row) > 6 else "nan"
+
+        fecha       = _parse_dms_fecha(desc)
+        descripcion = _parse_dms_desc(desc) or doc
+
+        v5 = 0.0 if deb5  in ("nan", "None", "", "0", "0.0")      else parse_anglosajón(deb5)
+        v6 = 0.0 if cred6 in ("nan", "None", "", "0", "0.0", "M") else parse_anglosajón(cred6)
+
+        if v5 > 0 and v6 == 0:   valor, tipo = v5,  "CREDITO"
+        elif v6 > 0 and v5 == 0: valor, tipo = -v6, "DEBITO"
+        else: continue
+
+        if abs(valor) < 1: continue
+
+        rows.append({"FECHA": fecha, "DESCRIPCION": descripcion, "VALOR": valor,
+                     "TIPO": tipo, "DOC_DMS": re.sub(r"\s+", " ", doc).strip(),
+                     "GMF": is_gmf(descripcion)})
+    return pd.DataFrame(rows) if rows else _empty_df()
+
+
+def _extract_dms_v2(data: bytes) -> pd.DataFrame:
+    """
+    Formato DMS v2 (23 cols con encabezados explícitos):
+      col[0]  = Cuenta        col[4]  = Tipo doc ('40', 'RCX'…)
+      col[5]  = Numero doc    col[10] = Fec  ('2026-05-01 00:00:00')
+      col[13] = Nombres       col[14] = Debito  (CREDITO extracto)
+      col[15] = Credito       (DEBITO extracto)
+      col[19] = Notas_docto   col[20] = Explicacion_contable
+    Fila 0 = encabezados → datos desde fila 1.
+    """
+    df_raw = pd.read_excel(io.BytesIO(data), header=None, dtype=str, sheet_name=0)
+    rows = []
+    for _, row in df_raw.iloc[1:].iterrows():
+        cuenta = str(row.iloc[0]).strip()
+        if cuenta in ("nan", "None", ""):
+            continue
+
+        tipo_doc = str(row.iloc[4]).strip() if len(row) > 4 else ""
+        num_doc  = str(row.iloc[5]).strip() if len(row) > 5 else ""
+        if tipo_doc in ("nan", "None", "") or num_doc in ("nan", "None", ""):
+            continue
+
+        doc = f"{tipo_doc} {num_doc}"
+
+        # Fecha: '2026-05-01 00:00:00' → '01/05'
+        fec_str = str(row.iloc[10]).strip() if len(row) > 10 else ""
+        fecha = ""
+        try:
+            from datetime import datetime as _dt
+            dt = _dt.fromisoformat(fec_str.split(" ")[0])
+            fecha = f"{dt.day:02d}/{dt.month:02d}"
+        except Exception:
+            pass
+
+        nombres     = str(row.iloc[13]).strip() if len(row) > 13 else ""
+        notas       = str(row.iloc[19]).strip() if len(row) > 19 else ""
+        explicacion = str(row.iloc[20]).strip() if len(row) > 20 else ""
+
+        partes = []
+        if explicacion not in ("nan", "None", "*", ""): partes.append(explicacion)
+        if nombres     not in ("nan", "None", "*", ""): partes.append(nombres)
+        if notas       not in ("nan", "None", "Nulo", ""): partes.append(notas)
+        descripcion = " – ".join(partes) if partes else doc
+
+        deb_s  = str(row.iloc[14]).strip() if len(row) > 14 else "nan"
+        cred_s = str(row.iloc[15]).strip() if len(row) > 15 else "nan"
+
+        v_deb  = 0.0 if deb_s  in ("nan", "None", "", "0", "0.0") else parse_anglosajón(deb_s)
+        v_cred = 0.0 if cred_s in ("nan", "None", "", "0", "0.0") else parse_anglosajón(cred_s)
+
+        if v_deb > 0 and v_cred == 0:   valor, tipo = v_deb,  "CREDITO"
+        elif v_cred > 0 and v_deb == 0: valor, tipo = -v_cred, "DEBITO"
+        else: continue
+
+        if abs(valor) < 1: continue
+
+        rows.append({"FECHA": fecha, "DESCRIPCION": descripcion, "VALOR": valor,
+                     "TIPO": tipo, "DOC_DMS": doc, "GMF": is_gmf(descripcion)})
+    return pd.DataFrame(rows) if rows else _empty_df()
+
+
 def extract_dms(excel_file) -> pd.DataFrame:
     """
-    Extrae movimientos del Excel DMS (MOVIMIENTOS BANCO MARZO XXXX.xlsx).
-
-    Estructura fija de 14 columnas:
-      col[0]  = Documento (ref: '40 59528', 'RCX 14334', '90 66610'…)
-      col[1]  = Descripción: 'DD-Mon-YYYY Notas Mov: NOMBRE Notas Doc: NOTA'
-      col[5]  = Débito DMS  → dinero ENTRANDO al banco  (CREDITO en extracto)
-      col[6]  = Crédito DMS → dinero SALIENDO del banco (DEBITO en extracto)
-
-    Regla 1-a-1:  si col5>0 y col6==0  → CREDITO
-                  si col6>0 y col5==0  → DEBITO
-                  si ambos o ninguno   → ignorar
-
-    Nota: el archivo tiene una fila de resumen de apertura (fila 1, Cuenta=número)
-    y una fila de cierre (doc=NaN) con los totales que se descartan por _doc_valido().
+    Auto-detecta el formato del Excel DMS (v1 o v2) y extrae los movimientos.
+    V1: sin encabezados explícitos, doc en col[0], descripción en col[1].
+    V2: encabezados en fila 0 (Cuenta, Desc_Cuenta, Debito, Credito…).
     """
     try:
-        df_raw = pd.read_excel(excel_file, header=None, dtype=str, sheet_name=0)
-        # Fila 0 = encabezado, Fila 1 = resumen apertura → empezar en fila 2
-        rows = []
-        for _, row in df_raw.iloc[2:].iterrows():
-            doc = str(row.iloc[0]).strip()
+        data = excel_file.read() if hasattr(excel_file, "read") else excel_file
+        df_head = pd.read_excel(io.BytesIO(data), header=None, dtype=str,
+                                nrows=1, sheet_name=0)
+        primera_fila = " ".join(str(x) for x in df_head.iloc[0].tolist()).upper()
 
-            # Descartar fila de cierre (doc='nan') y filas vacías
-            if not _doc_valido(doc):
-                continue
-
-            desc  = str(row.iloc[1]).strip()
-            deb5  = str(row.iloc[5]).strip() if len(row) > 5 else "nan"
-            cred6 = str(row.iloc[6]).strip() if len(row) > 6 else "nan"
-
-            fecha       = _parse_dms_fecha(desc)
-            descripcion = _parse_dms_desc(desc)
-            if not descripcion:
-                descripcion = doc
-
-            # col5 = Débito DMS = dinero entrando al banco = CREDITO en extracto
-            # col6 = Crédito DMS = dinero saliendo del banco = DEBITO en extracto
-            v5 = 0.0 if deb5  in ("nan", "None", "", "0", "0.0")       else parse_anglosajón(deb5)
-            v6 = 0.0 if cred6 in ("nan", "None", "", "0", "0.0", "M")  else parse_anglosajón(cred6)
-
-            # Solo usar filas donde EXACTAMENTE UNO de los dos tiene valor
-            if v5 > 0 and v6 == 0:
-                valor, tipo = v5, "CREDITO"
-            elif v6 > 0 and v5 == 0:
-                valor, tipo = -v6, "DEBITO"
-            else:
-                continue  # ambos > 0 o ninguno → ignorar
-
-            if abs(valor) < 1:
-                continue
-
-            rows.append({
-                "FECHA":       fecha,
-                "DESCRIPCION": descripcion,
-                "VALOR":       valor,
-                "TIPO":        tipo,
-                "DOC_DMS":     re.sub(r"\s+", " ", doc).strip(),
-                "GMF":         is_gmf(descripcion),
-            })
-        return pd.DataFrame(rows) if rows else _empty_df()
+        if "DESC_CUENTA" in primera_fila or (
+                "DEBITO" in primera_fila and "CREDITO" in primera_fila):
+            return _extract_dms_v2(data)
+        else:
+            return _extract_dms_v1(data)
     except Exception as e:
         st.error(f"Error leyendo DMS: {e}")
         st.exception(e)
@@ -1062,7 +1114,7 @@ def main():
             with st.spinner("Extrayendo DMS…"):
                 try:
                     excel_file.seek(0)
-                    df_dms = extract_dms(io.BytesIO(excel_file.read()))
+                    df_dms = extract_dms(excel_file)
                     if df_dms.empty:
                         # Diagnóstico: mostrar primeras filas del archivo subido
                         excel_file.seek(0)
