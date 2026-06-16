@@ -532,36 +532,78 @@ def extract_dms(excel_file) -> pd.DataFrame:
 # CONCILIACIÓN
 # ==============================================================
 
-def _find_subset(d_avail: pd.DataFrame, objetivo: int, max_n: int = 15, tol: int = 1):
+def _norm_fecha(f: str) -> str:
+    """'2/03' → '02/03',  '02/03' → '02/03'"""
+    parts = str(f).strip().split("/")
+    if len(parts) == 2:
+        try:
+            return f"{int(parts[0]):02d}/{parts[1].zfill(2)}"
+        except ValueError:
+            pass
+    return str(f).strip()
+
+
+def _do_subset(pool_vals, pool_idxs, objetivo: int, max_n: int, tol: int, max_pool: int):
     """
-    Busca subconjunto de filas en d_avail cuya suma de VALOR.abs() == objetivo ± tol.
-    Retorna lista de índices del DataFrame original, o None si no encuentra.
-    Usado para cruzar N registros DMS contra 1 movimiento bancario.
+    Búsqueda de subconjunto dentro de un pool ya ordenado (desc) de (valor, índice).
+    Retorna lista de índices o None.
+    Pool limitado a max_pool para controlar explosión combinatoria.
     """
     from itertools import combinations
 
-    cands = d_avail[d_avail["VALOR"].abs() <= objetivo + tol + 1].copy()
-    if len(cands) < 2:
-        return None
+    pairs   = list(zip(pool_vals, pool_idxs))[:max_pool]
+    vals_s  = [v for v, _ in pairs]
+    idxs_s  = [i for _, i in pairs]
 
-    vals = cands["VALOR"].abs().round(0).astype(int).tolist()
-    idxs = cands.index.tolist()
-    pairs = sorted(zip(vals, idxs), reverse=True)[:25]
-    vals_s = [v for v, _ in pairs]
-    idxs_s = [i for _, i in pairs]
-
-    # Límites de pool por n para evitar explosión combinatoria
-    limits = {2: 25, 3: 25, 4: 20, 5: 15, 6: 12, 7: 10, 8: 8, 9: 7, 10: 6}
+    # Límites de pool por número de elementos (C(pool,n) controlado)
+    lim = {2: max_pool, 3: max_pool, 4: min(max_pool, 35),
+           5: min(max_pool, 25), 6: min(max_pool, 18),
+           7: min(max_pool, 12), 8: min(max_pool, 9)}
 
     for n in range(2, min(max_n + 1, len(pairs) + 1)):
+        # Poda: si los n mayores no alcanzan el objetivo, n más grande tampoco ayuda
         if sum(vals_s[:n]) < objetivo - tol:
             continue
-        pool = min(len(pairs), limits.get(n, 6))
-        for combo in combinations(range(pool), n):
+        p = min(len(pairs), lim.get(n, 7))
+        for combo in combinations(range(p), n):
             if abs(sum(vals_s[i] for i in combo) - objetivo) <= tol:
                 return [idxs_s[i] for i in combo]
-
     return None
+
+
+def _find_subset(d_avail: pd.DataFrame, objetivo: int, fecha: str = "",
+                 max_n: int = 15, tol: int = 1):
+    """
+    Busca subconjunto de filas de d_avail cuya suma de VALOR.abs() == objetivo ± tol.
+    Estrategia:
+      1. Filtrar por misma fecha (_FECHA) → pool pequeño, búsqueda exhaustiva.
+      2. Si no encuentra, ampliar a todos los disponibles con pool limitado.
+    Retorna lista de índices del DataFrame original, o None.
+    """
+    def _prep(df_sub):
+        cands = df_sub[df_sub["VALOR"].abs() <= objetivo + tol + 1]
+        if len(cands) < 2:
+            return None, None
+        vals = cands["VALOR"].abs().round(0).astype(int).tolist()
+        idxs = cands.index.tolist()
+        pairs = sorted(zip(vals, idxs), reverse=True)
+        return [v for v, _ in pairs], [i for _, i in pairs]
+
+    # --- Paso A: misma fecha (pool = todos los del día, sin límite artificial) ---
+    if fecha and "_FECHA" in d_avail.columns:
+        same = d_avail[d_avail["_FECHA"] == fecha]
+        if len(same) >= 2:
+            vs, ix = _prep(same)
+            if vs is not None:
+                r = _do_subset(vs, ix, objetivo, max_n, tol, max_pool=len(vs))
+                if r is not None:
+                    return r
+
+    # --- Paso B: todos los disponibles (pool acotado) ---
+    vs, ix = _prep(d_avail)
+    if vs is None:
+        return None
+    return _do_subset(vs, ix, objetivo, max_n, tol, max_pool=25)
 
 
 def _resultado_vacio(df_banco):
@@ -599,8 +641,11 @@ def conciliar(df_banco: pd.DataFrame, df_dms: pd.DataFrame) -> dict:
         b = banco_op[banco_op["TIPO"] == tipo].copy().reset_index(drop=True)
         d = dms_op[dms_op["TIPO"] == tipo].copy().reset_index(drop=True)
 
-        b["_KEY"] = b["VALOR"].abs().round(0).astype(int)
-        d["_KEY"] = d["VALOR"].abs().round(0).astype(int)
+        b["_KEY"]   = b["VALOR"].abs().round(0).astype(int)
+        d["_KEY"]   = d["VALOR"].abs().round(0).astype(int)
+        # Fecha normalizada para filtrar subset por mismo día
+        b["_FECHA"] = b["FECHA"].apply(_norm_fecha)
+        d["_FECHA"] = d["FECHA"].apply(_norm_fecha)
 
         used_d = set()
         solo_b_tipo = []
@@ -627,12 +672,14 @@ def conciliar(df_banco: pd.DataFrame, df_dms: pd.DataFrame) -> dict:
             else:
                 solo_b_tipo.append(b_row)
 
-        # Paso 2: cruce N-DMS-a-1-Banco (un ingreso bancario = varios recibos DMS)
+        # Paso 2: cruce N-DMS-a-1-Banco (un pago bancario = varios recibos DMS)
+        # Busca primero entre registros DMS del mismo día, luego en todos.
         final_solo_b = []
         for b_row in solo_b_tipo:
             objetivo  = int(round(abs(b_row["VALOR"])))
+            fecha_b   = b_row["_FECHA"]
             d_avail   = d[~d.index.isin(used_d)]
-            found     = _find_subset(d_avail, objetivo)
+            found     = _find_subset(d_avail, objetivo, fecha=fecha_b)
             if found is not None:
                 matched_dms = d.loc[found]
                 dms_sum = matched_dms["VALOR"].abs().sum()
@@ -662,7 +709,7 @@ def conciliar(df_banco: pd.DataFrame, df_dms: pd.DataFrame) -> dict:
 
     def to_df(lst, cols=None):
         if not lst: return pd.DataFrame(columns=cols or [])
-        return pd.DataFrame(lst).drop(columns=["_KEY"], errors="ignore").reset_index(drop=True)
+        return pd.DataFrame(lst).drop(columns=["_KEY", "_FECHA"], errors="ignore").reset_index(drop=True)
 
     match_cols = ["FECHA", "DESCRIPCION", "VALOR", "Valor DMS", "Doc Dms", "# DMS", "Dif"]
     banco_cols  = ["FECHA", "DESCRIPCION", "VALOR", "TIPO", "GMF"]
