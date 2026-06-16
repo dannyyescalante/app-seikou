@@ -744,6 +744,7 @@ FILL_NARANJA= _fill("E67E22")
 FILL_ALT    = _fill("EBF5FB")
 FILL_ALT2   = _fill("FDFEFE")
 FILL_AGRUP  = _fill("D6EAF8")   # azul suave – ingreso dividido en varios DMS
+FILL_MORADO = _fill("6C3483")   # morado – movimientos solo en extracto banco
 FONT_HDR    = _font(bold=True, color="FFFFFF", size=10)
 FONT_BOLD   = _font(bold=True, size=10)
 FONT_NORM   = _font(size=10)
@@ -933,7 +934,7 @@ def generar_excel(df_banco, df_dms, resultado,
         wb = openpyxl.load_workbook(plantilla_file)
     else:
         wb = openpyxl.Workbook()
-        for name in ["CARATULA", "BANCO", "DMS", "+", "-", "X REVISAR", "GMF"]:
+        for name in ["CARATULA", "BANCO", "DMS", "+", "-", "INGRESO SIN CRUZAR", "EGRESO SIN CRUZAR", "SOLO BANCO", "GMF"]:
             wb.create_sheet(name)
         if "Sheet" in wb.sheetnames:
             del wb["Sheet"]
@@ -978,16 +979,34 @@ def generar_excel(df_banco, df_dms, resultado,
                   mark_col="# DMS", mark_fill=FILL_AGRUP)
         _write_leyenda_agrup(ws_men, len(menos) + 3)
 
-    # -- X REVISAR (DMS sin match) --
-    ws_xr = _get("X REVISAR")
+    # -- INGRESO SIN CRUZAR (DMS CREDITO sin par en banco) --
+    ws_inc = _get("INGRESO SIN CRUZAR")
     xr = resultado["x_rev_df"]
-    if not xr.empty:
-        out_cols = ["FECHA", "DESCRIPCION", "TIPO", "VALOR"]
-        if "DOC_DMS" in xr.columns:
-            out_cols.append("DOC_DMS")
-        xr_out = xr[out_cols].copy()
-        xr_out["VALOR"] = xr_out["VALOR"].abs()
-        _write_df(ws_xr, xr_out, hdr_fill=FILL_NARANJA, num_cols=["VALOR"])
+    xr_cred = xr[xr["TIPO"] == "CREDITO"].copy() if not xr.empty and "TIPO" in xr.columns else pd.DataFrame()
+    if not xr_cred.empty:
+        out_cols = ["FECHA", "DESCRIPCION", "VALOR"]
+        if "DOC_DMS" in xr_cred.columns: out_cols.append("DOC_DMS")
+        xr_cred_out = xr_cred[out_cols].copy()
+        xr_cred_out["VALOR"] = xr_cred_out["VALOR"].abs()
+        _write_df(ws_inc, xr_cred_out, hdr_fill=FILL_VERDE, num_cols=["VALOR"])
+
+    # -- EGRESO SIN CRUZAR (DMS DEBITO sin par en banco) --
+    ws_egr = _get("EGRESO SIN CRUZAR")
+    xr_deb = xr[xr["TIPO"] == "DEBITO"].copy() if not xr.empty and "TIPO" in xr.columns else pd.DataFrame()
+    if not xr_deb.empty:
+        out_cols = ["FECHA", "DESCRIPCION", "VALOR"]
+        if "DOC_DMS" in xr_deb.columns: out_cols.append("DOC_DMS")
+        xr_deb_out = xr_deb[out_cols].copy()
+        xr_deb_out["VALOR"] = xr_deb_out["VALOR"].abs()
+        _write_df(ws_egr, xr_deb_out, hdr_fill=FILL_ROJO, num_cols=["VALOR"])
+
+    # -- SOLO BANCO (extracto bancario sin par en DMS) --
+    ws_sb = _get("SOLO BANCO")
+    sb = resultado["solo_bco"]
+    if not sb.empty:
+        sb_out = sb[["FECHA", "DESCRIPCION", "TIPO", "VALOR"]].copy()
+        sb_out["VALOR"] = sb_out["VALOR"].abs()
+        _write_df(ws_sb, sb_out, hdr_fill=FILL_MORADO, num_cols=["VALOR"])
 
     # -- GMF --
     ws_gmf = _get("GMF")
@@ -1016,25 +1035,28 @@ def _mostrar(resultado, df_banco, df_dms, banco, saldo_banco, saldo_dms):
     n_mas    = len(resultado["mas_df"])
     n_men    = len(resultado["menos_df"])
     n_sb     = len(resultado["solo_bco"])
-    n_xr     = len(resultado["x_rev_df"])
+    xr       = resultado["x_rev_df"]
+    n_inc    = len(xr[xr["TIPO"] == "CREDITO"]) if not xr.empty and "TIPO" in xr.columns else 0
+    n_egr    = len(xr[xr["TIPO"] == "DEBITO"])  if not xr.empty and "TIPO" in xr.columns else 0
     n_gmf    = len(resultado["gmf_df"])
     concil   = n_mas + n_men
     pct      = round(concil / max(total_b, 1) * 100, 1)
     dif      = round(saldo_banco - saldo_dms, 2)
 
-    c1,c2,c3,c4,c5,c6 = st.columns(6)
-    c1.metric("Mov. Banco",  total_b)
-    c2.metric("Mov. DMS",    total_d)
-    c3.metric("Conciliados", concil, f"{pct}%")
-    c4.metric("Solo Banco",  n_sb,   delta=f"-{n_sb}" if n_sb else None, delta_color="inverse")
-    c5.metric("X Revisar",   n_xr,   delta=f"-{n_xr}" if n_xr else None, delta_color="inverse")
-    c6.metric("GMF",         n_gmf)
+    c1,c2,c3,c4,c5,c6,c7 = st.columns(7)
+    c1.metric("Mov. Banco",           total_b)
+    c2.metric("Mov. DMS",             total_d)
+    c3.metric("Conciliados",          concil, f"{pct}%")
+    c4.metric("Solo Banco",           n_sb,  delta=f"-{n_sb}"  if n_sb  else None, delta_color="inverse")
+    c5.metric("Ingreso sin cruzar",   n_inc, delta=f"-{n_inc}" if n_inc else None, delta_color="inverse")
+    c6.metric("Egreso sin cruzar",    n_egr, delta=f"-{n_egr}" if n_egr else None, delta_color="inverse")
+    c7.metric("GMF",                  n_gmf)
 
-    c7,c8,c9 = st.columns(3)
-    c7.metric("Saldo Banco",  _fmt(saldo_banco))
-    c8.metric("Saldo DMS",    _fmt(saldo_dms))
-    c9.metric("Diferencia",   _fmt(dif),
-              delta=" Cuadrado" if abs(dif) < 1 else " Diferencia")
+    c8,c9,c10 = st.columns(3)
+    c8.metric("Saldo Banco",  _fmt(saldo_banco))
+    c9.metric("Saldo DMS",    _fmt(saldo_dms))
+    c10.metric("Diferencia",  _fmt(dif),
+               delta=" Cuadrado" if abs(dif) < 1 else " Diferencia")
 
     tabs = st.tabs([
         f" Banco ({total_b})",
@@ -1042,7 +1064,8 @@ def _mostrar(resultado, df_banco, df_dms, banco, saldo_banco, saldo_dms):
         f" + Créditos ({n_mas})",
         f" − Débitos ({n_men})",
         f" Solo Banco ({n_sb})",
-        f" X Revisar ({n_xr})",
+        f" Ingreso sin cruzar ({n_inc})",
+        f" Egreso sin cruzar ({n_egr})",
         f" GMF ({n_gmf})",
     ])
     with tabs[0]:
@@ -1064,21 +1087,30 @@ def _mostrar(resultado, df_banco, df_dms, banco, saldo_banco, saldo_dms):
     with tabs[4]:
         sb = resultado["solo_bco"]
         if not sb.empty:
-            st.dataframe(sb[["FECHA","DESCRIPCION","VALOR","TIPO"]], use_container_width=True, height=380)
+            sb_view = sb[["FECHA","DESCRIPCION","TIPO","VALOR"]].copy()
+            sb_view["VALOR"] = sb_view["VALOR"].abs()
+            st.dataframe(sb_view, use_container_width=True, height=380)
         else:
-            st.success("¡Todo el banco está en el DMS!")
+            st.success("¡Todo el extracto bancario está en el DMS!")
     with tabs[5]:
-        xr = resultado["x_rev_df"]
-        if not xr.empty:
-            out_cols = ["FECHA", "DESCRIPCION", "TIPO", "VALOR"]
-            if "DOC_DMS" in xr.columns:
-                out_cols.append("DOC_DMS")
-            out = xr[out_cols].copy()
-            out["VALOR"] = out["VALOR"].abs()
+        xr_c = xr[xr["TIPO"] == "CREDITO"] if not xr.empty and "TIPO" in xr.columns else pd.DataFrame()
+        if not xr_c.empty:
+            out_cols = ["FECHA","DESCRIPCION","VALOR"]
+            if "DOC_DMS" in xr_c.columns: out_cols.append("DOC_DMS")
+            out = xr_c[out_cols].copy(); out["VALOR"] = out["VALOR"].abs()
             st.dataframe(out, use_container_width=True, height=380)
         else:
-            st.success("¡Todo el DMS está en el banco!")
+            st.success("¡Todos los ingresos DMS están en el banco!")
     with tabs[6]:
+        xr_d = xr[xr["TIPO"] == "DEBITO"] if not xr.empty and "TIPO" in xr.columns else pd.DataFrame()
+        if not xr_d.empty:
+            out_cols = ["FECHA","DESCRIPCION","VALOR"]
+            if "DOC_DMS" in xr_d.columns: out_cols.append("DOC_DMS")
+            out = xr_d[out_cols].copy(); out["VALOR"] = out["VALOR"].abs()
+            st.dataframe(out, use_container_width=True, height=380)
+        else:
+            st.success("¡Todos los egresos DMS están en el banco!")
+    with tabs[7]:
         gmf = resultado["gmf_df"]
         if not gmf.empty:
             st.dataframe(gmf[["FECHA","DESCRIPCION","VALOR"]], use_container_width=True, height=380)
