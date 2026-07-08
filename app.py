@@ -156,40 +156,58 @@ def extract_bancolombia(pdf_file, pdf_password=""):
 
 # -- BBVA -----------------------------------------------------
 # Estructura: Movi | FechaOp | FechaVal | Concepto | Cargos | Abonos | Saldo
-# Línea TX: empieza con número de movimiento de 4 dígitos
+# Línea TX: empieza con número de movimiento (4-5 dígitos)
+# Los importes vienen ALINEADOS A LA DERECHA, así que la columna se determina
+# por el borde derecho (x1) del número, no por dónde empieza (x0):
+#   cargos terminan ≈437 · abonos ≈513 · saldo ≈577
+
+_BBVA_AMOUNT_RE = re.compile(r"^-?\d{1,3}(?:,\d{3})*\.\d{2}$")
 
 def extract_bbva(pdf_file, pdf_password=""):
     rows = []
     with pdfplumber.open(pdf_file, password=pdf_password or None) as pdf:
         for page in pdf.pages:
             lns = _lines(page)
-            cargo_x = abono_x = None
+            # Fronteras por borde derecho; si hay encabezados de texto se recalibran
+            cargo_lim, saldo_lim = 475, 530
             for y, wl in lns.items():
                 t = _txt(wl).upper()
                 if "CARGOS" in t and "ABONOS" in t:
+                    cx = ax = None
                     for w in wl:
-                        if "CARGO" in w["text"].upper(): cargo_x = w["x0"]
-                        if "ABONO" in w["text"].upper(): abono_x = w["x0"]
+                        if "CARGO" in w["text"].upper(): cx = w["x1"]
+                        if "ABONO" in w["text"].upper(): ax = w["x1"]
+                    if cx and ax:
+                        cargo_lim = (cx + ax) / 2
+                        saldo_lim = ax + 20
                     break
-            if cargo_x is None: cargo_x, abono_x = 420, 500
 
             for y, wl in lns.items():
                 if not wl: continue
-                if not _match(wl[0]["text"], r"^\d{4}$"): continue
+                if not _match(wl[0]["text"], r"^\d{3,6}$"): continue
 
-                fecha_w = [w for w in wl if 35 <= w["x0"] < 140]
-                conc_w  = [w for w in wl if 140 <= w["x0"] < cargo_x - 4]
-                carg_w  = [w for w in wl if cargo_x - 4 <= w["x0"] < abono_x - 4]
-                abon_w  = [w for w in wl if abono_x - 4 <= w["x0"] < abono_x + 80]
+                fechas = [w["text"] for w in wl
+                          if re.match(r"^\d{2}-\d{2}-\d{4}$", w["text"])]
+                if not fechas: continue
+                fecha = fechas[0]                      # FechaOp
 
-                fecha = _txt(fecha_w)
-                desc  = _txt(conc_w).strip()
-                cargo = parse_anglosajón("".join(w["text"] for w in carg_w))
-                abono = parse_anglosajón("".join(w["text"] for w in abon_w))
+                amount_ws = [w for w in wl
+                             if _BBVA_AMOUNT_RE.match(w["text"]) and w["x1"] > 400]
+                if not amount_ws: continue
+                amount_ws.sort(key=lambda w: w["x1"])
+                # El último (más a la derecha) es el saldo; el anterior, el importe
+                importe_ws = [w for w in amount_ws if w["x1"] <= saldo_lim]
+                if not importe_ws: continue
+                imp_w  = importe_ws[-1]
+                valor  = parse_anglosajón(imp_w["text"])
+                if valor == 0: continue
+                tipo   = "DEBITO" if imp_w["x1"] < cargo_lim else "CREDITO"
+                if tipo == "DEBITO": valor = -valor
 
-                if cargo > 0:   valor, tipo = -cargo, "DEBITO"
-                elif abono > 0: valor, tipo = abono, "CREDITO"
-                else: continue
+                desc_ws = [w for w in wl
+                           if 165 <= w["x0"] and w["x1"] < imp_w["x0"] - 2
+                           and w["text"] not in fechas]
+                desc = _txt(desc_ws).strip()
                 rows.append({"FECHA": fecha, "DESCRIPCION": desc,
                               "VALOR": valor, "TIPO": tipo, "GMF": is_gmf(desc)})
     return pd.DataFrame(rows) if rows else _empty_df()
@@ -533,14 +551,55 @@ def extract_dms(excel_file) -> pd.DataFrame:
 # ==============================================================
 
 def _norm_fecha(f: str) -> str:
-    """'2/03' → '02/03',  '02/03' → '02/03'"""
-    parts = str(f).strip().split("/")
-    if len(parts) == 2:
+    """Normaliza la fecha de cualquier banco a 'DD/MM' (o 'DD' si solo hay día).
+    Formatos soportados:
+      '2/03'        → '02/03'   (Bancolombia)
+      '02/03'       → '02/03'   (Davivienda, DMS)
+      '2/03/2026'   → '02/03'   (Colpatria)
+      '01/03/26'    → '01/03'   (IRIS)
+      '28-02-2026'  → '28/02'   (BBVA: con guiones)
+      '01/03 02/03' → '01/03'   (fechas dobles → usa la primera)
+      '03'          → '03'      (Occidente: solo día)
+    Si no se reconoce, devuelve el texto tal cual (no cruzará por fecha)."""
+    s = str(f).strip()
+    if not s:
+        return s
+    primera = s.split()[0]           # fechas dobles: quedarse con la primera
+    parts = re.split(r"[/-]", primera)
+    try:
+        if len(parts) >= 2:
+            return f"{int(parts[0]):02d}/{int(parts[1]):02d}"
+        if len(parts) == 1 and parts[0].isdigit():
+            return f"{int(parts[0]):02d}"    # solo día (Occidente)
+    except ValueError:
+        pass
+    return s
+
+
+def _dias_diff(f1: str, f2: str) -> int:
+    """Diferencia en días entre fechas 'DD/MM' (o 'DD' solo-día, mismo mes).
+    Asume mismo periodo; tolera cruce dic-ene."""
+    p1 = str(f1).strip().split("/")
+    p2 = str(f2).strip().split("/")
+    # Ambas solo-día (Occidente): comparar dentro del mes
+    if len(p1) == 1 and len(p2) == 1:
         try:
-            return f"{int(parts[0]):02d}/{parts[1].zfill(2)}"
-        except ValueError:
-            pass
-    return str(f).strip()
+            diff = abs(int(p1[0]) - int(p2[0]))
+            return min(diff, 31 - diff)
+        except (ValueError, TypeError):
+            return 9999
+    def _ord(parts):
+        if len(parts) != 2:
+            return None
+        try:
+            return date(2000, int(parts[1]), int(parts[0])).toordinal()
+        except (ValueError, TypeError):
+            return None
+    o1, o2 = _ord(p1), _ord(p2)
+    if o1 is None or o2 is None:
+        return 9999
+    diff = abs(o1 - o2)
+    return min(diff, 366 - diff)
 
 
 def _do_subset(pool_vals, pool_idxs, objetivo: int, max_n: int, tol: int, max_pool: int):
@@ -599,6 +658,18 @@ def _find_subset(d_avail: pd.DataFrame, objetivo: int, fecha: str = "",
                 if r is not None:
                     return r
 
+    # --- Paso A2: ventana de fechas cercanas (± 3 días) ---
+    # Cubre el desfase frecuente entre la fecha del recibo DMS y la fecha en
+    # que el banco procesa/consigna el pago (común en Bancolombia).
+    if fecha and "_FECHA" in d_avail.columns:
+        cercanas = d_avail[d_avail["_FECHA"].apply(lambda f: _dias_diff(f, fecha) <= 3)]
+        if len(cercanas) >= 2:
+            vs, ix = _prep(cercanas)
+            if vs is not None:
+                r = _do_subset(vs, ix, objetivo, max_n, tol, max_pool=min(len(vs), 40))
+                if r is not None:
+                    return r
+
     # --- Paso B: todos los disponibles (pool acotado) ---
     vs, ix = _prep(d_avail)
     if vs is None:
@@ -647,13 +718,34 @@ def conciliar(df_banco: pd.DataFrame, df_dms: pd.DataFrame) -> dict:
         b["_FECHA"] = b["FECHA"].apply(_norm_fecha)
         d["_FECHA"] = d["FECHA"].apply(_norm_fecha)
 
+        # Occidente solo trae el día ('03'): reducir el DMS a solo-día también
+        # para que las fechas sean comparables dentro del mes del extracto.
+        if not b.empty and b["_FECHA"].str.match(r"^\d{2}$").all():
+            d["_FECHA"] = d["_FECHA"].str.split("/").str[0]
+
+        # ¿Las fechas de ambos lados son comparables ('DD/MM' o 'DD')?
+        # Si no (formato no reconocido), el filtro de fecha se desactiva y el
+        # Paso 1 cruza como antes (solo por valor), para no dejar de cruzar.
+        fechas_ok = (not b.empty and not d.empty
+                     and b["_FECHA"].str.match(r"^\d{2}(/\d{2})?$").mean() >= 0.8
+                     and d["_FECHA"].str.match(r"^\d{2}(/\d{2})?$").mean() >= 0.8)
+
         used_d = set()
         solo_b_tipo = []
 
-        # Paso 1: cruce 1-a-1
+        # Paso 1: cruce 1-a-1, SOLO del mismo día.
+        # No se permite aquí un match "de cualquier fecha" por coincidencia de
+        # valor: eso podía robarle una pieza a un pago que en realidad está
+        # dividido en varios recibos DMS (el Paso 2 los agrupa), dejando ese
+        # grupo incompleto para siempre. Los cruces 1-a-1 de fecha distinta se
+        # intentan solo al final, en el Paso 3, después de darle prioridad a
+        # los agrupamientos.
         for bi, b_row in b.iterrows():
             bk = b_row["_KEY"]
+            bf = b_row["_FECHA"]
             cands = d[(d["_KEY"].between(bk - 1, bk + 1)) & (~d.index.isin(used_d))]
+            if fechas_ok:
+                cands = cands[cands["_FECHA"] == bf]
             if not cands.empty:
                 best = cands.iloc[0]
                 dif  = abs(b_row["VALOR"]) - abs(best["VALOR"])
@@ -668,13 +760,14 @@ def conciliar(df_banco: pd.DataFrame, df_dms: pd.DataFrame) -> dict:
                 }
                 if tipo == "CREDITO": mas_rows.append(matched)
                 else:                 menos_rows.append(matched)
-                used_d.add(cands.index[0])
+                used_d.add(best.name)
             else:
                 solo_b_tipo.append(b_row)
 
         # Paso 2: cruce N-DMS-a-1-Banco (un pago bancario = varios recibos DMS)
-        # Busca primero entre registros DMS del mismo día, luego en todos.
-        final_solo_b = []
+        # Busca primero entre registros DMS del mismo día, luego en una ventana
+        # de fechas cercanas, y por último en todo el pool disponible.
+        solo_b_tipo2 = []
         for b_row in solo_b_tipo:
             objetivo  = int(round(abs(b_row["VALOR"])))
             fecha_b   = b_row["_FECHA"]
@@ -698,6 +791,32 @@ def conciliar(df_banco: pd.DataFrame, df_dms: pd.DataFrame) -> dict:
                 else:                 menos_rows.append(matched)
                 for idx in found:
                     used_d.add(idx)
+            else:
+                solo_b_tipo2.append(b_row)
+
+        # Paso 3: cruce 1-a-1 de fecha libre (último recurso).
+        # Ya se agotaron los agrupamientos posibles con lo que quedaba
+        # disponible, así que un match por valor de cualquier fecha en este
+        # punto ya no puede desarmar un grupo real.
+        final_solo_b = []
+        for b_row in solo_b_tipo2:
+            bk = b_row["_KEY"]
+            cands = d[(d["_KEY"].between(bk - 1, bk + 1)) & (~d.index.isin(used_d))]
+            if not cands.empty:
+                best = cands.iloc[0]
+                dif  = abs(b_row["VALOR"]) - abs(best["VALOR"])
+                matched = {
+                    "FECHA":       b_row["FECHA"],
+                    "DESCRIPCION": b_row["DESCRIPCION"],
+                    "VALOR":       b_row["VALOR"],
+                    "Valor DMS":   best["VALOR"],
+                    "Doc Dms":     best.get("DOC_DMS", ""),
+                    "# DMS":       1,
+                    "Dif":         round(dif, 2),
+                }
+                if tipo == "CREDITO": mas_rows.append(matched)
+                else:                 menos_rows.append(matched)
+                used_d.add(best.name)
             else:
                 final_solo_b.append(b_row)
 
