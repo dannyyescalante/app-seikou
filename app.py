@@ -463,43 +463,98 @@ def _extract_dms_v1(data: bytes) -> pd.DataFrame:
     return pd.DataFrame(rows) if rows else _empty_df()
 
 
+def _norm_header(h) -> str:
+    """Normaliza un encabezado: minúsculas, sin acentos, sin espacios extremos."""
+    import unicodedata
+    s = str(h).strip().lower()
+    s = unicodedata.normalize("NFD", s)
+    return "".join(c for c in s if unicodedata.category(c) != "Mn")
+
+
+def _map_columnas_v2(headers) -> dict:
+    """
+    Ubica las columnas del formato v2 POR NOMBRE de encabezado, no por posición,
+    para tolerar exports del DMS con las columnas en otro orden o con columnas
+    extra/faltantes. Devuelve dict nombre→índice (None si no se encontró).
+    """
+    hnorm = [_norm_header(h) for h in headers]
+
+    def _find(*candidatos, excluir=("niif",)):
+        # 1) coincidencia exacta
+        for cand in candidatos:
+            for i, h in enumerate(hnorm):
+                if h == cand:
+                    return i
+        # 2) empieza-por (evitando p.ej. 'debito_niif')
+        for cand in candidatos:
+            for i, h in enumerate(hnorm):
+                if h.startswith(cand) and not any(x in h for x in excluir):
+                    return i
+        return None
+
+    return {
+        "cuenta":  _find("cuenta"),
+        "tipo":    _find("tipo"),
+        "numero":  _find("numero", "número", "num"),
+        "fec":     _find("fec", "fecha"),
+        "dia":     _find("dia"),
+        "mes":     _find("mes"),
+        "nombres": _find("nombres", "nombre", "tercero"),
+        "deb":     _find("debito"),
+        "cred":    _find("credito"),
+        "notas":   _find("notas_docto", "notas"),
+        "expl":    _find("explicacion_contable", "explicacion", "detalle"),
+    }
+
+
 def _extract_dms_v2(data: bytes) -> pd.DataFrame:
     """
-    Formato DMS v2 (23 cols con encabezados explícitos):
-      col[0]  = Cuenta        col[4]  = Tipo doc ('40', 'RCX'…)
-      col[5]  = Numero doc    col[10] = Fec  ('2026-05-01 00:00:00')
-      col[13] = Nombres       col[14] = Debito  (CREDITO extracto)
-      col[15] = Credito       (DEBITO extracto)
-      col[19] = Notas_docto   col[20] = Explicacion_contable
-    Fila 0 = encabezados → datos desde fila 1.
+    Formato DMS v2 (encabezados explícitos en fila 0: Cuenta, Tipo, Numero,
+    Fec, Nombres, Debito, Credito, Notas_docto, Explicacion_contable…).
+    Las columnas se ubican por su NOMBRE; si algún nombre no aparece se usa
+    la posición histórica (0,4,5,10,13,14,15,19,20) como respaldo.
     """
     df_raw = pd.read_excel(io.BytesIO(data), header=None, dtype=str, sheet_name=0)
+    cm = _map_columnas_v2(df_raw.iloc[0].tolist())
+    # Respaldo posicional (layout histórico de 23 columnas)
+    pos = {"cuenta": 0, "tipo": 4, "numero": 5, "fec": 10, "nombres": 13,
+           "deb": 14, "cred": 15, "notas": 19, "expl": 20, "dia": 9, "mes": 8}
+    ix = {k: (cm.get(k) if cm.get(k) is not None else pos.get(k)) for k in pos}
+
+    def _cell(row, key):
+        i = ix.get(key)
+        if i is None or i >= len(row):
+            return ""
+        return str(row.iloc[i]).strip()
+
     rows = []
     for _, row in df_raw.iloc[1:].iterrows():
-        cuenta = str(row.iloc[0]).strip()
+        cuenta = _cell(row, "cuenta")
         if cuenta in ("nan", "None", ""):
             continue
 
-        tipo_doc = str(row.iloc[4]).strip() if len(row) > 4 else ""
-        num_doc  = str(row.iloc[5]).strip() if len(row) > 5 else ""
+        tipo_doc = _cell(row, "tipo")
+        num_doc  = _cell(row, "numero")
         if tipo_doc in ("nan", "None", "") or num_doc in ("nan", "None", ""):
             continue
 
         doc = f"{tipo_doc} {num_doc}"
 
-        # Fecha: '2026-05-01 00:00:00' → '01/05'
-        fec_str = str(row.iloc[10]).strip() if len(row) > 10 else ""
+        # Fecha: '2026-05-01 00:00:00' → '01/05'; respaldo con columnas Dia/Mes
+        fec_str = _cell(row, "fec")
         fecha = ""
         try:
             from datetime import datetime as _dt
             dt = _dt.fromisoformat(fec_str.split(" ")[0])
             fecha = f"{dt.day:02d}/{dt.month:02d}"
         except Exception:
-            pass
+            dia_s, mes_s = _cell(row, "dia"), _cell(row, "mes")
+            if dia_s.isdigit() and mes_s.isdigit():
+                fecha = f"{int(dia_s):02d}/{int(mes_s):02d}"
 
-        nombres     = str(row.iloc[13]).strip() if len(row) > 13 else ""
-        notas       = str(row.iloc[19]).strip() if len(row) > 19 else ""
-        explicacion = str(row.iloc[20]).strip() if len(row) > 20 else ""
+        nombres     = _cell(row, "nombres")
+        notas       = _cell(row, "notas")
+        explicacion = _cell(row, "expl")
 
         partes = []
         if explicacion not in ("nan", "None", "*", ""): partes.append(explicacion)
@@ -507,8 +562,8 @@ def _extract_dms_v2(data: bytes) -> pd.DataFrame:
         if notas       not in ("nan", "None", "Nulo", ""): partes.append(notas)
         descripcion = " – ".join(partes) if partes else doc
 
-        deb_s  = str(row.iloc[14]).strip() if len(row) > 14 else "nan"
-        cred_s = str(row.iloc[15]).strip() if len(row) > 15 else "nan"
+        deb_s  = _cell(row, "deb")  or "nan"
+        cred_s = _cell(row, "cred") or "nan"
 
         v_deb  = 0.0 if deb_s  in ("nan", "None", "", "0", "0.0") else parse_anglosajón(deb_s)
         v_cred = 0.0 if cred_s in ("nan", "None", "", "0", "0.0") else parse_anglosajón(cred_s)
@@ -522,6 +577,30 @@ def _extract_dms_v2(data: bytes) -> pd.DataFrame:
         rows.append({"FECHA": fecha, "DESCRIPCION": descripcion, "VALOR": valor,
                      "TIPO": tipo, "DOC_DMS": doc, "GMF": is_gmf(descripcion)})
     return pd.DataFrame(rows) if rows else _empty_df()
+
+
+def _validar_dms(df: pd.DataFrame) -> None:
+    """Alerta visible si la lectura del DMS parece dañada (formato no soportado),
+    para que el usuario no reciba una conciliación descuadrada sin aviso."""
+    problemas = []
+    if len(df) >= 20:
+        if df["VALOR"].abs().nunique() <= 2:
+            problemas.append("casi todos los movimientos tienen el mismo valor "
+                             "(posiblemente se leyó la cuenta contable como valor)")
+        pct_sin_fecha = (df["FECHA"].astype(str).str.strip() == "").mean()
+        if pct_sin_fecha > 0.5:
+            problemas.append("la mayoría de los movimientos quedaron sin fecha")
+        if df["TIPO"].nunique() == 1:
+            problemas.append("todos los movimientos quedaron del mismo tipo "
+                             "(solo ingresos o solo egresos)")
+    if problemas:
+        try:
+            st.error("⚠️ El Excel del DMS no se pudo interpretar bien: "
+                     + "; ".join(problemas)
+                     + ". Verifica que el archivo sea el export de movimientos "
+                       "correcto — la conciliación va a salir descuadrada.")
+        except Exception:
+            pass
 
 
 def extract_dms(excel_file) -> pd.DataFrame:
@@ -538,9 +617,11 @@ def extract_dms(excel_file) -> pd.DataFrame:
 
         if "DESC_CUENTA" in primera_fila or (
                 "DEBITO" in primera_fila and "CREDITO" in primera_fila):
-            return _extract_dms_v2(data)
+            df = _extract_dms_v2(data)
         else:
-            return _extract_dms_v1(data)
+            df = _extract_dms_v1(data)
+        _validar_dms(df)
+        return df
     except Exception as e:
         st.error(f"Error leyendo DMS: {e}")
         st.exception(e)
