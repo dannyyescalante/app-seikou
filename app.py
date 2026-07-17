@@ -429,21 +429,38 @@ def _doc_valido(x) -> bool:
 
 def _extract_dms_v1(data: bytes) -> pd.DataFrame:
     """
-    Formato DMS clásico (14 cols):
-      col[0] = Documento  col[1] = Descripción 'DD-Mon-YYYY Notas Mov:...'
-      col[5] = Débito DMS (CREDITO extracto)   col[6] = Crédito DMS (DEBITO extracto)
-    Fila 0 = encabezado, Fila 1 = resumen apertura → datos desde fila 2.
+    Formato DMS clásico: documento + descripción 'DD-Mon-YYYY Notas Mov:...'
+    + Débito (CREDITO extracto) / Crédito (DEBITO extracto).
+    Las columnas se ubican por NOMBRE de encabezado (Cuenta, Descripción,
+    Débito, Crédito); si el nombre no aparece se usan las posiciones
+    históricas (0, 1, 5, 6). Soporta tanto el export completo de 14
+    columnas como el resumido de 4 columnas (junio 2026).
+    Las filas de resumen/apertura se descartan por sus propios valores
+    (ambas columnas con total, o documento inválido).
     """
     df_raw = pd.read_excel(io.BytesIO(data), header=None, dtype=str, sheet_name=0)
+    hnorm = [_norm_header(h) for h in df_raw.iloc[0].tolist()]
+
+    def _find(nombre, fallback):
+        for i, h in enumerate(hnorm):
+            if h == nombre:
+                return i
+        return fallback
+
+    i_doc  = _find("cuenta", 0)
+    i_desc = _find("descripcion", 1)
+    i_deb  = _find("debito", 5)
+    i_cred = _find("credito", 6)
+
     rows = []
-    for _, row in df_raw.iloc[2:].iterrows():
-        doc = str(row.iloc[0]).strip()
+    for _, row in df_raw.iloc[1:].iterrows():
+        doc = str(row.iloc[i_doc]).strip() if i_doc < len(row) else ""
         if not _doc_valido(doc):
             continue
 
-        desc  = str(row.iloc[1]).strip()
-        deb5  = str(row.iloc[5]).strip() if len(row) > 5 else "nan"
-        cred6 = str(row.iloc[6]).strip() if len(row) > 6 else "nan"
+        desc  = str(row.iloc[i_desc]).strip() if i_desc < len(row) else ""
+        deb5  = str(row.iloc[i_deb]).strip()  if i_deb  < len(row) else "nan"
+        cred6 = str(row.iloc[i_cred]).strip() if i_cred < len(row) else "nan"
 
         fecha       = _parse_dms_fecha(desc)
         descripcion = _parse_dms_desc(desc) or doc
@@ -612,10 +629,16 @@ def extract_dms(excel_file) -> pd.DataFrame:
     try:
         data = excel_file.read() if hasattr(excel_file, "read") else excel_file
         df_head = pd.read_excel(io.BytesIO(data), header=None, dtype=str,
-                                nrows=1, sheet_name=0)
+                                nrows=6, sheet_name=0)
         primera_fila = " ".join(str(x) for x in df_head.iloc[0].tolist()).upper()
+        muestra = " ".join(str(x) for _, fila in df_head.iterrows()
+                           for x in fila.tolist()).upper()
 
-        if "DESC_CUENTA" in primera_fila or (
+        # 'Notas Mov:' en las primeras filas = formato clásico (v1), sin
+        # importar cómo vengan nombradas u ordenadas las columnas.
+        if "NOTAS MOV" in muestra:
+            df = _extract_dms_v1(data)
+        elif "DESC_CUENTA" in primera_fila or (
                 "DEBITO" in primera_fila and "CREDITO" in primera_fila):
             df = _extract_dms_v2(data)
         else:
