@@ -871,8 +871,19 @@ def conciliar(df_banco: pd.DataFrame, df_dms: pd.DataFrame) -> dict:
         # Paso 2: cruce N-DMS-a-1-Banco (un pago bancario = varios recibos DMS)
         # Busca primero entre registros DMS del mismo día, luego en una ventana
         # de fechas cercanas, y por último en todo el pool disponible.
-        solo_b_tipo2 = []
-        for b_row in solo_b_tipo:
+        #
+        # Cuando dos pagos divididos caen el mismo día y podrían armarse con
+        # recibos del mismo valor (ej. varios de $6.000.000), resolver los
+        # montos más grandes primero reduce el riesgo de que un pago chico
+        # consuma "de casualidad" un recibo que el pago grande necesitaba,
+        # dejándolo sin poder cerrar aunque sí exista una combinación válida
+        # para los dos. El orden de salida en el Excel se conserva igual que
+        # el orden original del extracto (no el orden de resolución).
+        orden_desc = sorted(range(len(solo_b_tipo)),
+                            key=lambda i: abs(solo_b_tipo[i]["VALOR"]), reverse=True)
+        matches_paso2 = {}
+        for i in orden_desc:
+            b_row     = solo_b_tipo[i]
             objetivo  = int(round(abs(b_row["VALOR"])))
             fecha_b   = b_row["_FECHA"]
             d_avail   = d[~d.index.isin(used_d)]
@@ -882,7 +893,7 @@ def conciliar(df_banco: pd.DataFrame, df_dms: pd.DataFrame) -> dict:
                 dms_sum = matched_dms["VALOR"].abs().sum()
                 docs = [str(r.get("DOC_DMS", "")) for _, r in matched_dms.iterrows()
                         if str(r.get("DOC_DMS", "")).strip() not in ("", "nan", "None")]
-                matched = {
+                matches_paso2[i] = {
                     "FECHA":       b_row["FECHA"],
                     "DESCRIPCION": b_row["DESCRIPCION"],
                     "VALOR":       b_row["VALOR"],
@@ -891,10 +902,15 @@ def conciliar(df_banco: pd.DataFrame, df_dms: pd.DataFrame) -> dict:
                     "# DMS":       len(found),
                     "Dif":         round(abs(b_row["VALOR"]) - dms_sum, 2),
                 }
-                if tipo == "CREDITO": mas_rows.append(matched)
-                else:                 menos_rows.append(matched)
                 for idx in found:
                     used_d.add(idx)
+
+        solo_b_tipo2 = []
+        for i, b_row in enumerate(solo_b_tipo):
+            matched = matches_paso2.get(i)
+            if matched is not None:
+                if tipo == "CREDITO": mas_rows.append(matched)
+                else:                 menos_rows.append(matched)
             else:
                 solo_b_tipo2.append(b_row)
 
