@@ -1148,6 +1148,53 @@ def _write_leyenda_agrup(ws, row):
     c_txt.font = Font(italic=True, color="1A5276", size=9, name="Calibri")
 
 
+def _consolidar_sin_cruzar(resultado, tipo):
+    """
+    Une en una sola lista TODO lo que falta por revisar de un mismo sentido
+    de dinero (CREDITO=ingreso o DEBITO=egreso), sin importar si falta del
+    lado del banco (extracto) o del lado de la contabilidad (DMS).
+    Antes esto quedaba repartido: lo que faltaba del DMS iba a "INGRESO/
+    EGRESO SIN CRUZAR" y lo que faltaba del banco iba aparte a "SOLO
+    BANCO", así que un movimiento sin cruzar podía no aparecer en la hoja
+    que el usuario esperaba. Cada fila queda marcada en ORIGEN para saber
+    de cuál lado falta.
+    """
+    xr = resultado["x_rev_df"]
+    sb = resultado["solo_bco"]
+    cols = ["FECHA", "DESCRIPCION", "VALOR", "DOC_DMS", "ORIGEN"]
+
+    partes = []
+    dms_rows = xr[xr["TIPO"] == tipo] if not xr.empty and "TIPO" in xr.columns else pd.DataFrame()
+    if not dms_rows.empty:
+        d = dms_rows[["FECHA", "DESCRIPCION", "VALOR"]].copy()
+        d["DOC_DMS"] = dms_rows["DOC_DMS"] if "DOC_DMS" in dms_rows.columns else ""
+        d["ORIGEN"] = "DMS"
+        partes.append(d)
+
+    bco_rows = sb[sb["TIPO"] == tipo] if not sb.empty else pd.DataFrame()
+    if not bco_rows.empty:
+        b = bco_rows[["FECHA", "DESCRIPCION", "VALOR"]].copy()
+        b["DOC_DMS"] = ""
+        b["ORIGEN"] = "BANCO"
+        partes.append(b)
+
+    if not partes:
+        return pd.DataFrame(columns=cols)
+
+    out = pd.concat(partes, ignore_index=True)
+    out["VALOR"] = out["VALOR"].abs()
+    return out[cols]
+
+
+def _write_leyenda_origen(ws, row):
+    """Explica la columna ORIGEN de las hojas de ingreso/egreso sin cruzar."""
+    c_txt = ws.cell(row, 2,
+        "Columna ORIGEN — 'DMS' = está en la contabilidad pero no en el "
+        "extracto bancario · 'BANCO' = está en el extracto bancario pero no "
+        "en la contabilidad")
+    c_txt.font = Font(italic=True, color="7B241C", size=9, name="Calibri")
+
+
 def generar_excel(df_banco, df_dms, resultado,
                   nombre_banco, cuenta_contable, num_cuenta,
                   saldo_banco, saldo_dms, elaborado_por, fecha_corte,
@@ -1202,28 +1249,22 @@ def generar_excel(df_banco, df_dms, resultado,
                   mark_col="# DMS", mark_fill=FILL_AGRUP)
         _write_leyenda_agrup(ws_men, len(menos) + 3)
 
-    # -- INGRESO SIN CRUZAR (DMS CREDITO sin par en banco) --
+    # -- INGRESO SIN CRUZAR (créditos sin cruzar: banco + DMS, ver ORIGEN) --
     ws_inc = _get("INGRESO SIN CRUZAR")
-    xr = resultado["x_rev_df"]
-    xr_cred = xr[xr["TIPO"] == "CREDITO"].copy() if not xr.empty and "TIPO" in xr.columns else pd.DataFrame()
-    if not xr_cred.empty:
-        out_cols = ["FECHA", "DESCRIPCION", "VALOR"]
-        if "DOC_DMS" in xr_cred.columns: out_cols.append("DOC_DMS")
-        xr_cred_out = xr_cred[out_cols].copy()
-        xr_cred_out["VALOR"] = xr_cred_out["VALOR"].abs()
-        _write_df(ws_inc, xr_cred_out, hdr_fill=FILL_VERDE, num_cols=["VALOR"])
+    inc_out = _consolidar_sin_cruzar(resultado, "CREDITO")
+    if not inc_out.empty:
+        _write_df(ws_inc, inc_out, hdr_fill=FILL_VERDE, num_cols=["VALOR"])
+        _write_leyenda_origen(ws_inc, len(inc_out) + 3)
 
-    # -- EGRESO SIN CRUZAR (DMS DEBITO sin par en banco) --
+    # -- EGRESO SIN CRUZAR (débitos sin cruzar: banco + DMS, ver ORIGEN) --
     ws_egr = _get("EGRESO SIN CRUZAR")
-    xr_deb = xr[xr["TIPO"] == "DEBITO"].copy() if not xr.empty and "TIPO" in xr.columns else pd.DataFrame()
-    if not xr_deb.empty:
-        out_cols = ["FECHA", "DESCRIPCION", "VALOR"]
-        if "DOC_DMS" in xr_deb.columns: out_cols.append("DOC_DMS")
-        xr_deb_out = xr_deb[out_cols].copy()
-        xr_deb_out["VALOR"] = xr_deb_out["VALOR"].abs()
-        _write_df(ws_egr, xr_deb_out, hdr_fill=FILL_ROJO, num_cols=["VALOR"])
+    egr_out = _consolidar_sin_cruzar(resultado, "DEBITO")
+    if not egr_out.empty:
+        _write_df(ws_egr, egr_out, hdr_fill=FILL_ROJO, num_cols=["VALOR"])
+        _write_leyenda_origen(ws_egr, len(egr_out) + 3)
 
-    # -- SOLO BANCO (extracto bancario sin par en DMS) --
+    # -- SOLO BANCO (detalle: todo el extracto bancario sin par en DMS,
+    #    créditos y débitos juntos — ya incluidos también arriba por tipo) --
     ws_sb = _get("SOLO BANCO")
     sb = resultado["solo_bco"]
     if not sb.empty:
@@ -1258,9 +1299,10 @@ def _mostrar(resultado, df_banco, df_dms, banco, saldo_banco, saldo_dms):
     n_mas    = len(resultado["mas_df"])
     n_men    = len(resultado["menos_df"])
     n_sb     = len(resultado["solo_bco"])
-    xr       = resultado["x_rev_df"]
-    n_inc    = len(xr[xr["TIPO"] == "CREDITO"]) if not xr.empty and "TIPO" in xr.columns else 0
-    n_egr    = len(xr[xr["TIPO"] == "DEBITO"])  if not xr.empty and "TIPO" in xr.columns else 0
+    inc_out  = _consolidar_sin_cruzar(resultado, "CREDITO")
+    egr_out  = _consolidar_sin_cruzar(resultado, "DEBITO")
+    n_inc    = len(inc_out)
+    n_egr    = len(egr_out)
     n_gmf    = len(resultado["gmf_df"])
     concil   = n_mas + n_men
     pct      = round(concil / max(total_b, 1) * 100, 1)
@@ -1316,23 +1358,19 @@ def _mostrar(resultado, df_banco, df_dms, banco, saldo_banco, saldo_dms):
         else:
             st.success("¡Todo el extracto bancario está en el DMS!")
     with tabs[5]:
-        xr_c = xr[xr["TIPO"] == "CREDITO"] if not xr.empty and "TIPO" in xr.columns else pd.DataFrame()
-        if not xr_c.empty:
-            out_cols = ["FECHA","DESCRIPCION","VALOR"]
-            if "DOC_DMS" in xr_c.columns: out_cols.append("DOC_DMS")
-            out = xr_c[out_cols].copy(); out["VALOR"] = out["VALOR"].abs()
-            st.dataframe(out, use_container_width=True, height=380)
+        if not inc_out.empty:
+            st.caption("ORIGEN: 'DMS' = está en contabilidad pero no en el banco · "
+                      "'BANCO' = está en el extracto bancario pero no en contabilidad")
+            st.dataframe(inc_out, use_container_width=True, height=380)
         else:
-            st.success("¡Todos los ingresos DMS están en el banco!")
+            st.success("¡No hay ingresos pendientes por cruzar, ni en banco ni en DMS!")
     with tabs[6]:
-        xr_d = xr[xr["TIPO"] == "DEBITO"] if not xr.empty and "TIPO" in xr.columns else pd.DataFrame()
-        if not xr_d.empty:
-            out_cols = ["FECHA","DESCRIPCION","VALOR"]
-            if "DOC_DMS" in xr_d.columns: out_cols.append("DOC_DMS")
-            out = xr_d[out_cols].copy(); out["VALOR"] = out["VALOR"].abs()
-            st.dataframe(out, use_container_width=True, height=380)
+        if not egr_out.empty:
+            st.caption("ORIGEN: 'DMS' = está en contabilidad pero no en el banco · "
+                      "'BANCO' = está en el extracto bancario pero no en contabilidad")
+            st.dataframe(egr_out, use_container_width=True, height=380)
         else:
-            st.success("¡Todos los egresos DMS están en el banco!")
+            st.success("¡No hay egresos pendientes por cruzar, ni en banco ni en DMS!")
     with tabs[7]:
         gmf = resultado["gmf_df"]
         if not gmf.empty:
