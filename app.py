@@ -708,29 +708,96 @@ def _dias_diff(f1: str, f2: str) -> int:
 
 def _do_subset(pool_vals, pool_idxs, objetivo: int, max_n: int, tol: int, max_pool: int):
     """
-    Búsqueda de subconjunto dentro de un pool ya ordenado (desc) de (valor, índice).
-    Retorna lista de índices o None.
-    Pool limitado a max_pool para controlar explosión combinatoria.
+    Búsqueda de subconjunto dentro de un pool (ya ordenado desc por valor)
+    cuya suma sea el objetivo ± tol. Retorna lista de índices o None.
+
+    Para cada tamaño n se seleccionan como candidatos los `lim[n]` valores
+    MÁS CERCANOS al promedio esperado (objetivo/n) — no los de mayor valor.
+    Un lote agrupado real (ej. varios recibos de tarjeta que arman un abono)
+    suele estar formado por valores parecidos entre sí; si ese día también
+    hay movimientos mucho más grandes sin relación (una factura grande, una
+    transferencia), quedarse con "los N más grandes" los descarta a todos
+    de la búsqueda y el grupo real nunca se encuentra aunque exista.
     """
     from itertools import combinations
 
-    pairs   = list(zip(pool_vals, pool_idxs))[:max_pool]
-    vals_s  = [v for v, _ in pairs]
-    idxs_s  = [i for _, i in pairs]
+    todos      = list(zip(pool_vals, pool_idxs))   # ya viene ordenado desc por valor
+    vals_desc  = [v for v, _ in todos]
 
-    # Límites de pool por número de elementos (C(pool,n) controlado)
-    lim = {2: max_pool, 3: max_pool, 4: min(max_pool, 35),
-           5: min(max_pool, 25), 6: min(max_pool, 18),
-           7: min(max_pool, 12), 8: min(max_pool, 9)}
+    # Límites de candidatos por número de elementos (C(cap,n) controlado)
+    lim = {2: max_pool, 3: max_pool, 4: min(max_pool, 60),
+           5: min(max_pool, 45), 6: min(max_pool, 32),
+           7: min(max_pool, 24), 8: min(max_pool, 18),
+           9: min(max_pool, 14), 10: min(max_pool, 12)}
 
-    for n in range(2, min(max_n + 1, len(pairs) + 1)):
+    for n in range(2, min(max_n + 1, len(todos) + 1)):
         # Poda: si los n mayores no alcanzan el objetivo, n más grande tampoco ayuda
-        if sum(vals_s[:n]) < objetivo - tol:
+        if sum(vals_desc[:n]) < objetivo - tol:
             continue
-        p = min(len(pairs), lim.get(n, 7))
-        for combo in combinations(range(p), n):
-            if abs(sum(vals_s[i] for i in combo) - objetivo) <= tol:
-                return [idxs_s[i] for i in combo]
+        promedio   = objetivo / n
+        cap        = min(len(todos), lim.get(n, 10))
+        candidatos = sorted(todos, key=lambda vi: abs(vi[0] - promedio))[:cap]
+        vals_n     = [v for v, _ in candidatos]
+        idxs_n     = [i for _, i in candidatos]
+        for combo in combinations(range(len(candidatos)), n):
+            if abs(sum(vals_n[i] for i in combo) - objetivo) <= tol:
+                return [idxs_n[i] for i in combo]
+    return None
+
+
+_EXACT_MAX_POOL = 40   # límite de tamaño de pool para la búsqueda exacta (Paso C)
+_EXACT_MAX_N    = 10   # límite de recibos combinados en la búsqueda exacta
+
+
+def _meet_middle(pool, objetivo: int, max_n: int, tol: int):
+    """
+    Búsqueda EXACTA (sin descartar candidatos por heurística) de un
+    subconjunto de `pool` (lista de (valor, índice)) de tamaño 2..max_n
+    cuya suma esté a ≤tol del objetivo. Técnica "meet in the middle":
+    divide el pool en dos mitades, enumera todas las sumas posibles de
+    cada una y las combina. A diferencia de _do_subset, no asume que los
+    valores del grupo real sean parecidos entre sí ni descarta ninguno de
+    antemano — encuentra el grupo aunque mezcle valores muy chicos y muy
+    grandes. Es más lento, por eso solo se usa como último recurso y con
+    el pool ya acotado a _EXACT_MAX_POOL (ver _por_tipo_doc).
+    """
+    from itertools import combinations
+    import bisect
+
+    n_pool = len(pool)
+    if n_pool < 2:
+        return None
+    mitad = n_pool // 2
+    A, B = pool[:mitad], pool[mitad:]
+
+    def _enumerar(grupo, max_k):
+        out = {0: {0: ()}}
+        for k in range(1, min(max_k, len(grupo)) + 1):
+            capa = {}
+            for combo in combinations(range(len(grupo)), k):
+                s = sum(grupo[i][0] for i in combo)
+                if s <= objetivo + tol and s not in capa:
+                    capa[s] = tuple(grupo[i][1] for i in combo)
+            out[k] = capa
+        return out
+
+    max_ka, max_kb = min(max_n, len(A)), min(max_n, len(B))
+    ea, eb = _enumerar(A, max_ka), _enumerar(B, max_kb)
+    eb_sorted = {k: sorted(d.keys()) for k, d in eb.items()}
+
+    for n in range(2, max_n + 1):
+        for ka in range(0, min(n, max_ka) + 1):
+            kb = n - ka
+            if kb < 0 or kb > max_kb or kb not in eb_sorted:
+                continue
+            da, sums_b = ea.get(ka, {}), eb_sorted[kb]
+            if not da or not sums_b:
+                continue
+            for sa, idxa in da.items():
+                lo, hi = objetivo - tol - sa, objetivo + tol - sa
+                pos = bisect.bisect_left(sums_b, lo)
+                if pos < len(sums_b) and sums_b[pos] <= hi:
+                    return list(idxa) + list(eb[kb][sums_b[pos]])
     return None
 
 
@@ -738,9 +805,20 @@ def _find_subset(d_avail: pd.DataFrame, objetivo: int, fecha: str = "",
                  max_n: int = 15, tol: int = 1):
     """
     Busca subconjunto de filas de d_avail cuya suma de VALOR.abs() == objetivo ± tol.
-    Estrategia:
-      1. Filtrar por misma fecha (_FECHA) → pool pequeño, búsqueda exhaustiva.
-      2. Si no encuentra, ampliar a todos los disponibles con pool limitado.
+    Estrategia (cada paso solo se intenta si el anterior no encontró nada):
+      A.  Mismo día.
+      A2. Ventana de fechas cercanas (± 3 días) — cubre el desfase entre la
+          fecha del recibo DMS y la fecha en que el banco lo consigna.
+      B.  Todos los disponibles (pool acotado, búsqueda rápida por heurística).
+      C.  Último recurso: búsqueda EXACTA separando el pool por tipo de
+          documento del DMS (90, RCX, 40…). Un lote real (ej. varios
+          recibos de tarjeta "90" que arman un abono agrupado) está hecho
+          de valores parecidos entre sí; si ese día también hay facturas
+          grandes de otro tipo de documento, la heurística de los pasos
+          A/A2/B los descarta a todos y el lote nunca se encuentra aunque
+          exista. Separar por tipo de documento aísla el lote real del
+          resto, y ahí sí se puede buscar exacto (pool ya chico). Solo se
+          prueba al final porque es más lento que los pasos anteriores.
     Retorna lista de índices del DataFrame original, o None.
     """
     def _prep(df_sub):
@@ -751,6 +829,21 @@ def _find_subset(d_avail: pd.DataFrame, objetivo: int, fecha: str = "",
         idxs = cands.index.tolist()
         pairs = sorted(zip(vals, idxs), reverse=True)
         return [v for v, _ in pairs], [i for _, i in pairs]
+
+    def _por_tipo_doc(pool_df):
+        if "DOC_DMS" not in pool_df.columns or pool_df.empty:
+            return None
+        tipos = pool_df["DOC_DMS"].astype(str).str.strip().str.split().str[0]
+        for t, cnt in tipos.value_counts().items():
+            if cnt < 2:
+                continue
+            vs, ix = _prep(pool_df[tipos == t])
+            if vs is None or len(vs) > _EXACT_MAX_POOL:
+                continue
+            r = _meet_middle(list(zip(vs, ix)), objetivo, min(max_n, _EXACT_MAX_N), tol)
+            if r is not None:
+                return r
+        return None
 
     # --- Paso A: misma fecha (pool = todos los del día, sin límite artificial) ---
     if fecha and "_FECHA" in d_avail.columns:
@@ -763,8 +856,7 @@ def _find_subset(d_avail: pd.DataFrame, objetivo: int, fecha: str = "",
                     return r
 
     # --- Paso A2: ventana de fechas cercanas (± 3 días) ---
-    # Cubre el desfase frecuente entre la fecha del recibo DMS y la fecha en
-    # que el banco procesa/consigna el pago (común en Bancolombia).
+    cercanas = None
     if fecha and "_FECHA" in d_avail.columns:
         cercanas = d_avail[d_avail["_FECHA"].apply(lambda f: _dias_diff(f, fecha) <= 3)]
         if len(cercanas) >= 2:
@@ -776,9 +868,14 @@ def _find_subset(d_avail: pd.DataFrame, objetivo: int, fecha: str = "",
 
     # --- Paso B: todos los disponibles (pool acotado) ---
     vs, ix = _prep(d_avail)
-    if vs is None:
-        return None
-    return _do_subset(vs, ix, objetivo, max_n, tol, max_pool=25)
+    if vs is not None:
+        r = _do_subset(vs, ix, objetivo, max_n, tol, max_pool=25)
+        if r is not None:
+            return r
+
+    # --- Paso C: exacto por tipo de documento (último recurso) ---
+    pool_c = cercanas if cercanas is not None and len(cercanas) >= 2 else d_avail
+    return _por_tipo_doc(pool_c)
 
 
 def _resultado_vacio(df_banco):
