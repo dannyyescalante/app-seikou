@@ -801,24 +801,34 @@ def _meet_middle(pool, objetivo: int, max_n: int, tol: int):
     return None
 
 
+_RE_LOTE = re.compile(
+    r"ABONO\s*BRUTO|VISA|MASTER|AMEX|DINERS|TARJETA|CONSIGNAC|REDEBAN|PLINK|"
+    r"TRANSFERENCIA\s*CTA|CARGO\s*DOMI|DOMICILIAC",
+    re.IGNORECASE,
+)
+
+
 def _find_subset(d_avail: pd.DataFrame, objetivo: int, fecha: str = "",
-                 max_n: int = 15, tol: int = 1):
+                 max_n: int = 15, tol: int = 1, descripcion: str = ""):
     """
     Busca subconjunto de filas de d_avail cuya suma de VALOR.abs() == objetivo ± tol.
     Estrategia (cada paso solo se intenta si el anterior no encontró nada):
       A.  Mismo día.
       A2. Ventana de fechas cercanas (± 3 días) — cubre el desfase entre la
           fecha del recibo DMS y la fecha en que el banco lo consigna.
-      B.  Todos los disponibles (pool acotado, búsqueda rápida por heurística).
-      C.  Último recurso: búsqueda EXACTA separando el pool por tipo de
-          documento del DMS (90, RCX, 40…). Un lote real (ej. varios
-          recibos de tarjeta "90" que arman un abono agrupado) está hecho
-          de valores parecidos entre sí; si ese día también hay facturas
-          grandes de otro tipo de documento, la heurística de los pasos
-          A/A2/B los descarta a todos y el lote nunca se encuentra aunque
-          exista. Separar por tipo de documento aísla el lote real del
-          resto, y ahí sí se puede buscar exacto (pool ya chico). Solo se
-          prueba al final porque es más lento que los pasos anteriores.
+      B.  Último recurso: todo el pool disponible (sin ventana de fecha),
+          SIEMPRE separado por tipo de documento del DMS (90, RCX, 40…) —
+          nunca mezclando tipos — y SOLO si `descripcion` parece un lote
+          real (ABONO BRUTO, VISA/MASTER/AMEX, consignación, domiciliación
+          …). Un lote real (ej. varios recibos de tarjeta "90") es
+          homogéneo por tipo de documento; combinar recibos de tipos
+          distintos y sin relación de fecha es arriesgado —con suficientes
+          candidatos casi cualquier suma "coincide" por pura casualidad,
+          robándole el recibo real a su verdadero cruce (pasó: un pago a un
+          proveedor "cruzó" con una mezcla de recibos de tarjeta y facturas
+          de cliente de semanas antes solo porque la suma daba igual). Por
+          eso solo se intenta para movimientos cuya descripción sugiere un
+          lote agrupado, y siempre dentro de un mismo tipo de documento.
     Retorna lista de índices del DataFrame original, o None.
     """
     def _prep(df_sub):
@@ -831,6 +841,12 @@ def _find_subset(d_avail: pd.DataFrame, objetivo: int, fecha: str = "",
         return [v for v, _ in pairs], [i for _, i in pairs]
 
     def _por_tipo_doc(pool_df):
+        """Búsqueda amplia (sin ventana de fecha) SIEMPRE separada por tipo
+        de documento — nunca mezclando tipos. Un lote real (ej. tarjeta,
+        todo tipo "90") es homogéneo por tipo de documento; buscar en el
+        pool mezclado (90 + RCX + 40...) solo producía coincidencias falsas
+        (una combinación que sumaba bien de pura casualidad, mezclando
+        recibos de tarjeta con facturas de cliente sin relación alguna)."""
         if "DOC_DMS" not in pool_df.columns or pool_df.empty:
             return None
         tipos = pool_df["DOC_DMS"].astype(str).str.strip().str.split().str[0]
@@ -838,11 +854,15 @@ def _find_subset(d_avail: pd.DataFrame, objetivo: int, fecha: str = "",
             if cnt < 2:
                 continue
             vs, ix = _prep(pool_df[tipos == t])
-            if vs is None or len(vs) > _EXACT_MAX_POOL:
+            if vs is None:
                 continue
-            r = _meet_middle(list(zip(vs, ix)), objetivo, min(max_n, _EXACT_MAX_N), tol)
+            r = _do_subset(vs, ix, objetivo, max_n, tol, max_pool=min(len(vs), 25))
             if r is not None:
                 return r
+            if len(vs) <= _EXACT_MAX_POOL:
+                r = _meet_middle(list(zip(vs, ix)), objetivo, min(max_n, _EXACT_MAX_N), tol)
+                if r is not None:
+                    return r
         return None
 
     # --- Paso A: misma fecha (pool = todos los del día, sin límite artificial) ---
@@ -856,7 +876,6 @@ def _find_subset(d_avail: pd.DataFrame, objetivo: int, fecha: str = "",
                     return r
 
     # --- Paso A2: ventana de fechas cercanas (± 3 días) ---
-    cercanas = None
     if fecha and "_FECHA" in d_avail.columns:
         cercanas = d_avail[d_avail["_FECHA"].apply(lambda f: _dias_diff(f, fecha) <= 3)]
         if len(cercanas) >= 2:
@@ -866,16 +885,11 @@ def _find_subset(d_avail: pd.DataFrame, objetivo: int, fecha: str = "",
                 if r is not None:
                     return r
 
-    # --- Paso B: todos los disponibles (pool acotado) ---
-    vs, ix = _prep(d_avail)
-    if vs is not None:
-        r = _do_subset(vs, ix, objetivo, max_n, tol, max_pool=25)
-        if r is not None:
-            return r
-
-    # --- Paso C: exacto por tipo de documento (último recurso) ---
-    pool_c = cercanas if cercanas is not None and len(cercanas) >= 2 else d_avail
-    return _por_tipo_doc(pool_c)
+    # --- Paso B/C: todo el pool disponible, siempre separado por tipo de
+    # documento, y solo si la descripción sugiere un lote real ---
+    if not _RE_LOTE.search(str(descripcion)):
+        return None
+    return _por_tipo_doc(d_avail)
 
 
 def _resultado_vacio(df_banco):
@@ -984,7 +998,8 @@ def conciliar(df_banco: pd.DataFrame, df_dms: pd.DataFrame) -> dict:
             objetivo  = int(round(abs(b_row["VALOR"])))
             fecha_b   = b_row["_FECHA"]
             d_avail   = d[~d.index.isin(used_d)]
-            found     = _find_subset(d_avail, objetivo, fecha=fecha_b)
+            found     = _find_subset(d_avail, objetivo, fecha=fecha_b,
+                                     descripcion=b_row["DESCRIPCION"])
             if found is not None:
                 matched_dms = d.loc[found]
                 dms_sum = matched_dms["VALOR"].abs().sum()
