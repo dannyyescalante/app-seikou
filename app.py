@@ -801,11 +801,113 @@ def _meet_middle(pool, objetivo: int, max_n: int, tol: int):
     return None
 
 
+def _grupo_multi_banco(filas, d_avail: pd.DataFrame, tol: int = 1, max_n: int = 15,
+                       franquicia: str = ""):
+    """
+    Cruza VARIOS movimientos del banco (mismo día, mismo tipo, descripción
+    de lote) contra los recibos DMS que, juntos, suman exactamente el total
+    de esos movimientos — y reparte esos recibos entre cada movimiento
+    según su propio valor. Cubre el caso real de Bancolombia partiendo el
+    lote de tarjeta de un día en dos o más consignaciones en vez de una
+    sola (ej. el 9/12 el lote VISA de 4 recibos se dividió en dos abonos
+    de $1.269.177 y $1.968.600 en vez de uno solo de $3.237.777).
+
+    filas: lista de (objetivo:int, idx:int, row) — idx identifica la fila
+    dentro de la lista que llama, para poder marcarla como resuelta.
+    Solo aplica dentro de un mismo tipo de documento del DMS (mismo motivo
+    que _por_tipo_doc: mezclar tipos produce coincidencias falsas). Si
+    `franquicia` viene informada, se prueba primero solo con recibos DMS de
+    esa misma franquicia antes de caer al tipo de documento completo (mismo
+    motivo: mezclar VISA con MASTER le robaba recibos a otro lote).
+    Si no logra repartir TODOS los movimientos con exactitud, no aplica
+    nada — o cruza todo el grupo correctamente, o lo deja intacto para que
+    el resto del flujo lo trate como sin cruzar.
+    Retorna lista de (idx, row, [idx_dms...]) o None.
+    """
+    if len(filas) < 2:
+        return None
+    objetivo_total = sum(o for o, _, _ in filas)
+    if "DOC_DMS" not in d_avail.columns or d_avail.empty:
+        return None
+
+    tipos = d_avail["DOC_DMS"].astype(str).str.strip().str.split().str[0]
+    grupos_candidatos = []
+    for t, cnt in tipos.value_counts().items():
+        if cnt < 2:
+            continue
+        grupo_tipo = d_avail[tipos == t]
+        parece_lote = grupo_tipo["DESCRIPCION"].apply(lambda d: bool(_RE_LOTE.search(str(d))))
+        if parece_lote.mean() < 0.5:
+            continue
+        if franquicia:
+            mismo_franq = grupo_tipo[grupo_tipo["DESCRIPCION"].apply(_franquicia) == franquicia]
+            if len(mismo_franq) >= 2:
+                grupos_candidatos.append(mismo_franq)
+        grupos_candidatos.append(grupo_tipo)
+
+    for sub in grupos_candidatos:
+        cands = sub[sub["VALOR"].abs() <= objetivo_total + tol + 1]
+        if len(cands) < 2:
+            continue
+        vals = cands["VALOR"].abs().round(0).astype(int).tolist()
+        idxs = cands.index.tolist()
+        pool = list(zip(vals, idxs))
+        if len(pool) > _EXACT_MAX_POOL:
+            continue
+
+        grupo_total = _meet_middle(pool, objetivo_total, min(max_n, _EXACT_MAX_N), tol)
+        if grupo_total is None:
+            continue
+        grupo_set = set(grupo_total)
+        restante = [(v, i) for v, i in pool if i in grupo_set]
+
+        # Repartir: los montos más grandes primero (menos combinaciones
+        # posibles, igual que en conciliar()), dejando lo que sobra para
+        # el último movimiento sin necesidad de buscarlo.
+        orden = sorted(filas, key=lambda x: x[0], reverse=True)
+        asignacion, ok = [], True
+        for objetivo_i, idx_i, row_i in orden[:-1]:
+            individual = next((i for v, i in restante if abs(v - objetivo_i) <= tol), None)
+            if individual is not None:
+                asignacion.append((idx_i, row_i, [individual]))
+                restante = [(v, i) for v, i in restante if i != individual]
+                continue
+            hallado = _meet_middle(restante, objetivo_i, min(max_n, _EXACT_MAX_N), tol)
+            if hallado is None:
+                ok = False
+                break
+            asignacion.append((idx_i, row_i, hallado))
+            hallado_set = set(hallado)
+            restante = [(v, i) for v, i in restante if i not in hallado_set]
+        if not ok:
+            continue
+
+        ultimo_obj, ultimo_idx, ultimo_row = orden[-1]
+        suma_resto = sum(v for v, _ in restante)
+        if restante and abs(suma_resto - ultimo_obj) <= tol:
+            asignacion.append((ultimo_idx, ultimo_row, [i for _, i in restante]))
+            return asignacion
+    return None
+
+
 _RE_LOTE = re.compile(
     r"ABONO\s*BRUTO|VISA|MASTER|AMEX|DINERS|TARJETA|CONSIGNAC|REDEBAN|PLINK|"
     r"TRANSFERENCIA\s*CTA|CARGO\s*DOMI|DOMICILIAC",
     re.IGNORECASE,
 )
+
+_RE_FRANQUICIA = re.compile(r"VISA|MASTERCARD|MASTER|MAESTRO|AMEX|DINERS", re.IGNORECASE)
+
+
+def _franquicia(texto) -> str:
+    """Extrae la franquicia de tarjeta mencionada en una descripción, o ''
+    si no hay ninguna. Mastercard/Master/Maestro se tratan como la misma
+    familia (Maestro es un producto débito de Mastercard)."""
+    m_ = _RE_FRANQUICIA.search(str(texto))
+    if not m_:
+        return ""
+    palabra = m_.group(0).upper()
+    return "MASTER" if palabra in ("MASTERCARD", "MASTER", "MAESTRO") else palabra
 
 
 def _find_subset(d_avail: pd.DataFrame, objetivo: int, fecha: str = "",
@@ -840,29 +942,60 @@ def _find_subset(d_avail: pd.DataFrame, objetivo: int, fecha: str = "",
         pairs = sorted(zip(vals, idxs), reverse=True)
         return [v for v, _ in pairs], [i for _, i in pairs]
 
+    def _intentar(sub_df):
+        vs, ix = _prep(sub_df)
+        if vs is None:
+            return None
+        r = _do_subset(vs, ix, objetivo, max_n, tol, max_pool=min(len(vs), 25))
+        if r is not None:
+            return r
+        if len(vs) <= _EXACT_MAX_POOL:
+            return _meet_middle(list(zip(vs, ix)), objetivo, min(max_n, _EXACT_MAX_N), tol)
+        return None
+
     def _por_tipo_doc(pool_df):
         """Búsqueda amplia (sin ventana de fecha) SIEMPRE separada por tipo
         de documento — nunca mezclando tipos. Un lote real (ej. tarjeta,
         todo tipo "90") es homogéneo por tipo de documento; buscar en el
         pool mezclado (90 + RCX + 40...) solo producía coincidencias falsas
         (una combinación que sumaba bien de pura casualidad, mezclando
-        recibos de tarjeta con facturas de cliente sin relación alguna)."""
+        recibos de tarjeta con facturas de cliente sin relación alguna).
+
+        Dentro de un mismo tipo de documento, si la descripción del banco
+        menciona una franquicia (VISA/MASTER/AMEX…), se intenta primero
+        SOLO con recibos DMS de esa misma franquicia — mezclar VISA con
+        MASTER en la búsqueda le robaba recibos reales a otro lote de la
+        franquicia correcta (ej. un abono MASTER de otro día terminó
+        usando recibos VISA). Si eso no encuentra nada, se prueba con el
+        tipo de documento completo como respaldo, porque a veces un lote
+        de una franquicia sí incluye productos de otra (ej. tarjetas
+        Maestro dentro de un lote VISA).
+
+        Solo se consideran tipos de documento donde la MAYORÍA de sus
+        propias descripciones también parecen de lote (ej. "90" está lleno
+        de "Cons Aut ... TARJETA..."). Sin este filtro, para un movimiento
+        "ABONO BRUTO VISA" se probaba también el pool de facturas de
+        cliente (tipo "RCX", cientos de valores distintos) y con tantos
+        candidatos casi cualquier suma "coincidía" por pura casualidad."""
         if "DOC_DMS" not in pool_df.columns or pool_df.empty:
             return None
+        franquicia_obj = _franquicia(descripcion)
         tipos = pool_df["DOC_DMS"].astype(str).str.strip().str.split().str[0]
         for t, cnt in tipos.value_counts().items():
             if cnt < 2:
                 continue
-            vs, ix = _prep(pool_df[tipos == t])
-            if vs is None:
+            grupo_tipo = pool_df[tipos == t]
+            parece_lote = grupo_tipo["DESCRIPCION"].apply(lambda d: bool(_RE_LOTE.search(str(d))))
+            if parece_lote.mean() < 0.5:
                 continue
-            r = _do_subset(vs, ix, objetivo, max_n, tol, max_pool=min(len(vs), 25))
-            if r is not None:
-                return r
-            if len(vs) <= _EXACT_MAX_POOL:
-                r = _meet_middle(list(zip(vs, ix)), objetivo, min(max_n, _EXACT_MAX_N), tol)
+            if franquicia_obj:
+                mismo_franq = grupo_tipo[grupo_tipo["DESCRIPCION"].apply(_franquicia) == franquicia_obj]
+                r = _intentar(mismo_franq)
                 if r is not None:
                     return r
+            r = _intentar(grupo_tipo)
+            if r is not None:
+                return r
         return None
 
     # --- Paso A: misma fecha (pool = todos los del día, sin límite artificial) ---
@@ -1051,6 +1184,54 @@ def conciliar(df_banco: pd.DataFrame, df_dms: pd.DataFrame) -> dict:
                 used_d.add(best.name)
             else:
                 final_solo_b.append(b_row)
+
+        # Paso 4: varios movimientos del banco = un mismo lote del DMS.
+        # Bancolombia a veces reparte el lote de tarjeta de un día en dos o
+        # más consignaciones en vez de una sola; ningún movimiento por
+        # separado cruza, pero juntos sí explican exactamente los mismos
+        # recibos. Solo se agrupan movimientos del MISMO día cuya
+        # descripción sugiere un lote real (misma condición que _find_subset).
+        # Se agrupa por fecha Y franquicia (si la descripción menciona una):
+        # mezclar VISA con MASTER del mismo día le robaría recibos reales a
+        # otro lote de la franquicia correcta.
+        from collections import defaultdict
+        por_fecha = defaultdict(list)
+        for i, b_row in enumerate(final_solo_b):
+            if _RE_LOTE.search(str(b_row["DESCRIPCION"])):
+                clave = (b_row["_FECHA"], _franquicia(b_row["DESCRIPCION"]))
+                por_fecha[clave].append(i)
+
+        resueltos_idx = set()
+        for (fecha_grp, franq_grp), idxs_dia in por_fecha.items():
+            if len(idxs_dia) < 2:
+                continue
+            filas = [(int(round(abs(final_solo_b[i]["VALOR"]))), i, final_solo_b[i])
+                     for i in idxs_dia]
+            d_avail_grp = d[~d.index.isin(used_d)]
+            asign = _grupo_multi_banco(filas, d_avail_grp, tol=1, franquicia=franq_grp)
+            if asign is None:
+                continue
+            for idx_i, row_i, dms_idxs in asign:
+                matched_dms = d.loc[dms_idxs]
+                dms_sum = matched_dms["VALOR"].abs().sum()
+                docs = [str(x.get("DOC_DMS", "")) for _, x in matched_dms.iterrows()
+                        if str(x.get("DOC_DMS", "")).strip() not in ("", "nan", "None")]
+                matched = {
+                    "FECHA":       row_i["FECHA"],
+                    "DESCRIPCION": row_i["DESCRIPCION"],
+                    "VALOR":       row_i["VALOR"],
+                    "Valor DMS":   dms_sum if tipo == "CREDITO" else -dms_sum,
+                    "Doc Dms":     ", ".join(docs),
+                    "# DMS":       len(dms_idxs),
+                    "Dif":         round(abs(row_i["VALOR"]) - dms_sum, 2),
+                }
+                if tipo == "CREDITO": mas_rows.append(matched)
+                else:                 menos_rows.append(matched)
+                for idx in dms_idxs:
+                    used_d.add(idx)
+                resueltos_idx.add(idx_i)
+
+        final_solo_b = [r for i, r in enumerate(final_solo_b) if i not in resueltos_idx]
 
         solo_banco_rows.extend(final_solo_b)
 
